@@ -52,8 +52,8 @@ async def _run_scan(target: str, rate_limit: float | None, proxy: str | None) ->
 
     print_banner(display)
 
-    if not settings.groq_api_key:
-        console.print("[red]Error: GROQ_API_KEY not set. Copy .env.example to .env and add your key.[/red]")
+    if not settings.llm_api_key and not settings.groq_api_key:
+        console.print("[red]Error: LLM_API_KEY (or GROQ_API_KEY) not set. Copy .env.example to .env and add your key.[/red]")
         sys.exit(1)
 
     init_langfuse()
@@ -93,7 +93,7 @@ async def _run_scan(target: str, rate_limit: float | None, proxy: str | None) ->
     print_summary(state, duration)
     write_json_report(state, duration)
 
-    report_path = await generate_report(state, llm_client, duration)
+    report_path = await generate_report(state=state, llm_client=llm_client, duration=duration)
     print_report_path(report_path)
 
     flush_langfuse()
