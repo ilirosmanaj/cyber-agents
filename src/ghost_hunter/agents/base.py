@@ -5,11 +5,16 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 
+import httpx
+
 from src.ghost_hunter.clients import AdaptiveHttpClient, LLMClient, trace_span
 from src.ghost_hunter.models import AgentResult, ScanState
 
 # cap on blocked paths included in LLM context to avoid token bloat
 _MAX_BLOCKED_PATHS_IN_CONTEXT = 10
+
+MAX_RESPONSE_BODY_SNIPPET = 2000
+_TEXT_CONTENT_TYPES = ("text/", "json", "xml")
 
 
 class BaseAgent(ABC):
@@ -82,6 +87,16 @@ class BaseAgent(ABC):
         return "\n".join(
             f"- [{f.severity.value}] {f.title}" for f in state.findings[:limit]
         )
+
+    @staticmethod
+    def extract_body_snippet(resp: httpx.Response) -> str:
+        """Capture first N chars of text-based responses for analysis."""
+        ct = resp.headers.get("content-type", "")
+        if resp.status_code >= 300:
+            return ""
+        if not any(t in ct for t in _TEXT_CONTENT_TYPES):
+            return ""
+        return resp.text[:MAX_RESPONSE_BODY_SNIPPET]
 
     @abstractmethod
     async def run(self, state: ScanState) -> AgentResult:

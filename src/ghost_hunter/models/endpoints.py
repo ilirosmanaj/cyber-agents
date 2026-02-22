@@ -44,6 +44,7 @@ class Endpoint(BaseModel):
     response_fields: list[str] = Field(default_factory=list)
     security_schemes: list[SecuritySchemeInfo] = Field(default_factory=list)
     response_headers: dict[str, str] = Field(default_factory=dict)
+    response_body_snippet: str = ""  # first 2000 chars of response (for analysis)
 
 
 class Finding(BaseModel):
@@ -53,6 +54,8 @@ class Finding(BaseModel):
     detail: str
     severity: RiskLevel = RiskLevel.INFO
     evidence: str = ""
+    validated: bool | None = None  # None=untested, True=confirmed, False=refuted
+    validation_evidence: str = ""
 
 
 class TechFingerprint(BaseModel):

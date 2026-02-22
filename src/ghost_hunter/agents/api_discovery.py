@@ -428,6 +428,7 @@ class APIDiscoveryAgent(BaseAgent):
                         status_code=resp.status_code,
                         content_type=resp.headers.get("content-type", ""),
                         discovered_by=DiscoverySource.COMMON_PATH,
+                        response_body_snippet=self.extract_body_snippet(resp),
                     )
                 )
                 if resp.status_code == 403:
@@ -565,7 +566,8 @@ class APIDiscoveryAgent(BaseAgent):
                 if not path:
                     continue
 
-                resp = await self.http.request(method if method == "GET" else "HEAD", path)
+                probe_method = method if method == "GET" else "HEAD"
+                resp = await self.http.request(probe_method, path)
                 if resp and resp.status_code < 404:
                     endpoints.append(
                         Endpoint(
@@ -575,6 +577,7 @@ class APIDiscoveryAgent(BaseAgent):
                             content_type=resp.headers.get("content-type", ""),
                             discovered_by=DiscoverySource.LLM_API_GUESS,
                             notes=f"LLM guess: {guess.get('reason', '')}",
+                            response_body_snippet=self.extract_body_snippet(resp),
                         )
                     )
                     validated += 1

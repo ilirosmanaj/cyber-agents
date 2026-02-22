@@ -78,6 +78,8 @@ class ScanState(BaseModel):
             existing.security_schemes = new.security_schemes
         if new.response_headers:
             existing.response_headers.update(new.response_headers)
+        if new.response_body_snippet and not existing.response_body_snippet:
+            existing.response_body_snippet = new.response_body_snippet
 
     def find_endpoint(self, method: str, url: str) -> Endpoint | None:
         """Find an endpoint by exact key, falling back to URL-only match."""

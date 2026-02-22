@@ -24,6 +24,7 @@ DEFAULT_PHASE_ORDER = [
     "classifier",
     "vuln_analyzer",
     "prioritizer",
+    "probe_validator",
 ]
 
 AGENT_TOOLS = [
@@ -39,7 +40,8 @@ AGENT_TOOLS = [
             "hypothesis (LLM hypothesizes + validates new endpoints), "
             "classifier (LLM classifies endpoints by type/auth), "
             "vuln_analyzer (structural vulnerability pattern detection), "
-            "prioritizer (LLM ranks attack surface).",
+            "prioritizer (LLM ranks attack surface), "
+            "probe_validator (active validation of top findings with safe probes).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -132,8 +134,9 @@ class Orchestrator:
                     "from discovery phases. Produces: categories, auth flags.\n"
                     "7. vuln_analyzer — Two-pass vulnerability detection (deterministic + LLM). "
                     "REQUIRES: classifier output (categories, auth flags).\n"
-                    "8. prioritizer — LLM ranks attack surface. REQUIRES: vuln_analyzer. "
-                    "MUST run last.\n\n"
+                    "8. prioritizer — LLM ranks attack surface. REQUIRES: vuln_analyzer.\n"
+                    "9. probe_validator — Active validation of top findings with safe probes. "
+                    "REQUIRES: prioritizer (for ranked attack surface). MUST run last.\n\n"
                     "ACTION:\n"
                     "Before each agent call, reason about:\n"
                     "- What information does this agent need? Has it been produced?\n"

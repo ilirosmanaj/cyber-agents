@@ -198,7 +198,14 @@ def write_json_report(state: ScanState, duration: float) -> str:
         "errors": state.errors,
     }
 
-    filename = f"ghost_hunter_report_{state.scan_id}.json"
+    output_dir = Path("outputs")
+    output_dir.mkdir(exist_ok=True)
+    filename = str(output_dir / f"ghost_hunter_report_{state.scan_id}.json")
     Path(filename).write_text(json.dumps(report, indent=2, default=str))
-    console.print(f"\n[green]Report written to {filename}[/green]")
+    console.print(f"\n[green]JSON report written to {filename}[/green]")
     return filename
+
+
+def print_report_path(report_path: str) -> None:
+    """Print the path to the generated AI pentest report."""
+    console.print(f"[green bold]AI Pentest Report written to {report_path}[/green bold]")

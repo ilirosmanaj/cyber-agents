@@ -202,6 +202,32 @@ _SENSITIVE_RESPONSE_FIELDS = {
     "pin", "tax_id",
 }
 
+# Response body leak patterns
+_INTERNAL_IP_PATTERN = re.compile(
+    r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"
+)
+_STACK_TRACE_PATTERN = re.compile(
+    r"(?:Traceback \(most recent|at (?:com|org|net|io)\.\w+|"
+    r"Exception in thread|java\.\w+Exception|System\.NullReferenceException|"
+    r"File \"[^\"]+\", line \d+)",
+    re.IGNORECASE,
+)
+_SQL_FRAGMENT_PATTERN = re.compile(
+    r"(?:SQL(?:State|Exception)|mysql_|pg_|ORA-\d+|"
+    r"(?:syntax error|You have an error in your SQL|Unclosed quotation mark))",
+    re.IGNORECASE,
+)
+_API_KEY_TOKEN_PATTERN = re.compile(
+    r"(?:sk-[a-zA-Z0-9]{20,}|pk_(?:live|test)_[a-zA-Z0-9]{20,}|"
+    r"ghp_[a-zA-Z0-9]{36}|eyJ[a-zA-Z0-9_-]{20,}\.eyJ)",
+)
+_EMAIL_PATTERN = re.compile(
+    r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b"
+)
+
+# more than this many emails in a single response suggests a data dump
+_EXCESSIVE_EMAIL_THRESHOLD = 3
+
 # Numeric path segments longer than this are likely not enumerable IDs
 _MAX_NUMERIC_ID_LENGTH = 10
 
@@ -326,6 +352,7 @@ class VulnPatternAnalyzer(BaseAgent):
         "_check_info_disclosure",
         "_check_auth_boundary",
         "_check_excessive_data",
+        "_check_response_body_leaks",
     ]
 
     async def run(self, state: ScanState) -> AgentResult:
@@ -783,6 +810,62 @@ class VulnPatternAnalyzer(BaseAgent):
             ),
         )]
 
+    @staticmethod
+    def _check_response_body_leaks(ep: Endpoint) -> list[VulnIndicator]:
+        """Detect sensitive data leaked in response body snippets."""
+        body = ep.response_body_snippet
+        if not body:
+            return []
+
+        indicators: list[VulnIndicator] = []
+
+        match = _STACK_TRACE_PATTERN.search(body)
+        if match:
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.HIGH,
+                evidence=f"Stack trace in response: {match.group(0)[:80]}",
+                description="Stack trace leaks internal paths and framework details.",
+            ))
+
+        ips = _INTERNAL_IP_PATTERN.findall(body)
+        if ips:
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.MEDIUM,
+                evidence=f"Internal IPs in response: {', '.join(ips[:3])}",
+                description="RFC 1918 addresses exposed, reveals infrastructure layout.",
+            ))
+
+        match = _SQL_FRAGMENT_PATTERN.search(body)
+        if match:
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.HIGH,
+                evidence=f"SQL error in response: {match.group(0)[:80]}",
+                description="SQL error in output — potential injection surface, leaks DB type.",
+            ))
+
+        match = _API_KEY_TOKEN_PATTERN.search(body)
+        if match:
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                confidence=RiskLevel.CRITICAL,
+                evidence=f"API key/token pattern: {match.group(0)[:30]}...",
+                description="API key or token pattern found in response body.",
+            ))
+
+        emails = _EMAIL_PATTERN.findall(body)
+        if len(emails) > _EXCESSIVE_EMAIL_THRESHOLD:
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                confidence=RiskLevel.MEDIUM,
+                evidence=f"Multiple emails in response: {', '.join(emails[:3])} + {len(emails)-3} more",
+                description="Bulk email addresses returned, likely over-fetching user records.",
+            ))
+
+        return indicators
+
     # ------------------------------------------------------------------
     # Pass 2: LLM analysis
     # ------------------------------------------------------------------
@@ -858,6 +941,11 @@ class VulnPatternAnalyzer(BaseAgent):
                 f"  Body fields: {body_fields}\n"
                 f"  Response fields: {resp_fields}"
             )
+
+            # include response body snippet for LLM context
+            if ep.response_body_snippet:
+                snippet = ep.response_body_snippet[:500]
+                lines.append(f"  Response body (first 500 chars): {snippet}")
 
             indicators = state.vuln_indicators.get(key, [])
             if indicators:

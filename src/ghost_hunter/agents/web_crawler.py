@@ -87,12 +87,15 @@ class WebCrawlerAgent(BaseAgent):
 
             pages_crawled += 1
 
+            content_type_header = resp.headers.get("content-type", "")
+
             page_ep = Endpoint(
                 url=normalized,
                 method="GET",
                 status_code=resp.status_code,
-                content_type=resp.headers.get("content-type", ""),
+                content_type=content_type_header,
                 discovered_by=DiscoverySource.CRAWL,
+                response_body_snippet=self.extract_body_snippet(resp),
             )
             endpoints.append(page_ep)
 
@@ -105,8 +108,7 @@ class WebCrawlerAgent(BaseAgent):
             if resp.status_code != 200:
                 continue
 
-            content_type = resp.headers.get("content-type", "")
-            if "text/html" not in content_type:
+            if "text/html" not in content_type_header:
                 continue
 
             try:

@@ -23,9 +23,11 @@ from src.ghost_hunter.output import (
     console,
     print_attack_surface,
     print_banner,
+    print_report_path,
     print_summary,
     write_json_report,
 )
+from src.ghost_hunter.report import generate_report
 
 
 def _normalize_target(target: str) -> tuple[str, str]:
@@ -90,6 +92,10 @@ async def _run_scan(target: str, rate_limit: float | None, proxy: str | None) ->
     print_attack_surface(state)
     print_summary(state, duration)
     write_json_report(state, duration)
+
+    report_path = await generate_report(state, llm_client, duration)
+    print_report_path(report_path)
+
     flush_langfuse()
 
 
@@ -109,12 +115,13 @@ def main(
     verbose: bool,
 ) -> None:
     """Ghost Hunter — discover API endpoints and map the attack surface of TARGET."""
-    level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(
-        level=level,
+        level=logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    if verbose:
+        logging.getLogger("src.ghost_hunter").setLevel(logging.DEBUG)
 
     if max_depth is not None:
         settings.max_crawl_depth = max_depth
