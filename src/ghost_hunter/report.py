@@ -5,9 +5,11 @@ from __future__ import annotations
 import itertools
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 from src.ghost_hunter.clients.llm import LLMClient
 from src.ghost_hunter.models import (
+    AttackSurfaceEntry,
     Endpoint,
     Finding,
     RiskLevel,
@@ -39,83 +41,122 @@ CWE_REFERENCES: dict[str, str] = {
 }
 
 REPORT_SYSTEM_PROMPT = """\
-CONTEXT:
-You are synthesizing a penetration test report from the results of an automated \
-security assessment. The assessment was performed by Ghost Hunter, a multi-agent \
-system that combines deterministic pattern matching with LLM-powered semantic \
-analysis to discover, classify, and analyze API vulnerabilities.
+You are a senior penetration tester writing a report. Follow OWASP/PTES conventions.
 
-IMPORTANT — CONFIDENCE LEVELS:
-All findings in this report are from the discovery and reconnaissance phase. \
-No findings have been confirmed through active exploitation. When presenting \
-findings, use these confidence labels:
-- **Confirmed** — only if the finding data includes [VALIDATED]
-- **Likely** — strong evidence from multiple signals (deterministic check + LLM analysis)
-- **Suspected** — single signal or pattern match only
-If a finding is marked [REFUTED], note it was disproven during validation.
+RULES (MANDATORY — violating any rule makes the report FAIL):
+1. Every finding MUST include CWE from the CWE MAP provided.
+2. Impact MUST name the specific endpoint, parameter, and attack step.
+   BAD: "An attacker could access sensitive information"
+   GOOD: "An attacker sends GET /accounts/{id} with another user's id to retrieve their balance"
+3. Remediation MUST name the specific fix for the specific endpoint.
+   BAD: "Implement proper input validation"
+   BAD: "Implement input validation on all endpoints" (too generic)
+   GOOD: "Add ownership check on /accounts/{id}: verify request.user.id matches account.owner_id"
+4. Include ALL critical and high findings — not just the first 5.
+5. Include suggested test commands (curl) for critical and high findings.
+6. Each critical/high finding needs an "Attack Scenario" with numbered exploitation steps.
+7. NEVER use these phrases: "implement proper", "validate and sanitize", \
+"access sensitive information", "sensitive data", "could potentially", \
+"gain unauthorized access", "execute the prompt".
+8. Confidence levels — STRICT RULES:
+   - **Confirmed** ONLY when the finding data includes the literal tag [VALIDATED] \
+(meaning automated exploitation was verified). Most findings will NOT be confirmed.
+   - **Likely** when there are multiple signals (deterministic check + LLM analysis) \
+but no active exploitation was performed.
+   - **Suspected** when there is only a single signal or pattern match.
+   - If [REFUTED], note it was disproven during validation.
+   DEFAULT TO **Likely** OR **Suspected**. Do NOT use Confirmed unless [VALIDATED] is present.
+9. Output raw markdown. Use ## for sections, ### for subsections. \
+Use severity badges: **[CRITICAL]**, **[HIGH]**, **[MEDIUM]**, **[LOW]**, **[INFO]**.
+10. Do NOT generate the Attack Surface Map table — it will be inserted automatically. \
+Write only a brief summary paragraph for that section.
+11. Test commands — STRICT RULES:
+   a) Use CONCRETE example values (12345, victim_user, etc.), never bare angle-bracket \
+placeholders like <card_id>. If you must show a placeholder, quote it: "${CARD_ID}".
+   b) Parameter location determines curl structure:
+      - PATH param ({card_id} in /cards/{card_id}): value goes IN THE URL.
+        BAD:  curl -H 'card_id: 123' https://target.com/api/cards/
+        GOOD: curl https://target.com/api/cards/12345 -H 'Authorization: Bearer TOKEN'
+      - QUERY param: value goes in URL with ?param=value.
+        BAD:  curl -H 'account_number: 123' https://target.com/api/transactions
+        GOOD: curl 'https://target.com/api/transactions?account_number=12345' -H 'Authorization: Bearer TOKEN'
+      - BODY param: value goes in -d JSON with the exact field name.
+        BAD:  curl -d '{"url": "x"}' (wrong field name for image_url param)
+        GOOD: curl -d '{"image_url": "http://169.254.169.254/latest/meta-data/"}' https://target.com/upload_url
+      - FILE UPLOAD (multipart/form-data): use -F, never -d with JSON.
+        BAD:  curl -H 'Content-Type: application/json' -d '{"file": "test.jpg"}'
+        GOOD: curl -F "file=@malicious.php" https://target.com/upload -H 'Authorization: Bearer TOKEN'
+   c) NEVER put path or query parameters in custom headers (-H 'param: value'). \
+Only Authorization and Content-Type belong in headers.
+   d) Always include -H 'Authorization: Bearer TOKEN' for endpoints that require auth.
+   e) Use the FULL URL (https://target.com/...), not relative paths.
+   f) If suggested tests are provided in the finding data, prefer those over inventing new ones.
 
-ROLE:
-Senior penetration tester writing a report for both technical and executive audiences. \
-Follow OWASP and PTES conventions.
+VULN-SPECIFIC ACCURACY:
+- prompt_injection: The attack steers LLM behavior (overrides system instructions, \
+exfiltrates system prompt, triggers unintended tool calls). It is NOT code execution. \
+Never say the server "executes" the prompt.
+   BAD: "The server executes the malicious message"
+   GOOD: "The LLM processes the injected instructions, potentially overriding its system \
+prompt or exposing internal configuration"
+- race_condition on transfer/payment endpoints: The impact is double-spending or balance \
+manipulation, NOT information disclosure.
+   BAD: "An attacker can gain unauthorized access to sensitive information"
+   GOOD: "An attacker sends concurrent POST /transfer requests to double-spend the same balance"
+- excessive_data_exposure on /login or /auth: A token in the login response is EXPECTED. \
+Only flag excessive_data_exposure on auth endpoints if non-essential sensitive fields \
+(password hash, SSN, internal IDs) are returned. Token fields are normal.
 
-ACTION:
-Generate a complete markdown report with these sections:
+SECTION-SPECIFIC RULES:
+- Target Profile: ONLY include technical facts — server software, frameworks, languages, \
+security headers present/missing, cookies. Do NOT include planner focus areas or strategy \
+here. Strategy belongs in Methodology.
+- Recommendations: MUST be endpoint-specific. Each recommendation references a specific \
+endpoint or finding and names the exact fix. Do NOT write generic advice like \
+"Implement input validation on all endpoints."
+   BAD: "Implement server-side authorization on all endpoints"
+   GOOD: "Add owner_id check on GET /transactions/{account_number} — return 403 if \
+requesting user does not own the account"
 
-1. **Executive Summary** — 3-5 sentences: scope, findings count by severity, overall \
-risk posture, most critical discovery.
-
-2. **Scope & Limitations** — What was tested (passive recon, crawling, API spec parsing, \
-JS analysis, pattern matching, LLM analysis). What was NOT tested: authenticated \
-endpoint behavior, business logic beyond crawlable paths, rate limiting, DoS resilience. \
-State that findings are discovery-phase and have not been confirmed through exploitation \
-unless marked [VALIDATED].
-
-3. **Methodology** — Which agents ran, what techniques were used. Briefly describe the \
-multi-agent pipeline.
-
-4. **Target Profile** — Technology fingerprint, frameworks detected, security headers \
-present/missing, security posture assessment.
-
-5. **Critical & High Findings** — Each finding with:
-   - Title, severity badge, and CWE reference (use the CWE REFERENCE MAP provided)
-   - Confidence level (Confirmed / Likely / Suspected)
-   - Endpoint(s) affected
-   - Evidence
-   - Impact description
-   - Remediation recommendation
-
-6. **Attack Surface Map** — Top-20 prioritized endpoints as a markdown table with \
-risk level, category, and vulnerability indicators.
-
-7. **Vulnerability Pattern Analysis** — Distribution of vulnerability types, chained \
-vulnerabilities, LLM-enhanced vs deterministic findings, suppressed false positives.
-
-8. **Recommendations** — Prioritized remediation roadmap: immediate (critical), \
-short-term (high), medium-term (medium), long-term improvements.
-
-FORMAT:
-Output raw markdown. Use ## for sections, ### for subsections. Use tables, bullet lists, \
-and code blocks where appropriate. Include severity badges like **[CRITICAL]**, **[HIGH]**, \
-**[MEDIUM]**, **[LOW]**, **[INFO]**.
-
-FINDING QUALITY:
-For each finding, you MUST:
-- Describe the specific attack scenario: what would an attacker DO, step by step?
-- Reference the actual parameter names, response fields, and endpoint paths from the evidence
-- Explain WHY the detected pattern is dangerous for THIS specific endpoint \
-(e.g., "The message parameter is passed directly to an LLM without sanitization, \
-allowing an attacker to inject instructions that override system prompts")
-- Write remediation specific to the technology and endpoint, not generic advice \
-(e.g., "Add an LLM input guardrail that rejects prompts containing system-override \
-patterns" instead of "Implement input validation")
-
-DO NOT write generic impact descriptions like "An attacker could extract sensitive \
-information." Every finding must reference concrete data from the evidence provided.
-
-TONE:
-Precise and actionable. Reference specific URLs, parameters, and response data. \
-Be clear about confidence levels — don't present pattern matches as confirmed exploits.
+TONE: Precise, actionable. Reference specific URLs, parameters, response data. No filler.\
 """
+
+_FINDING_EXAMPLE = """\
+EXAMPLE FINDING FORMAT (follow this structure for every critical/high finding):
+
+### BOLA/IDOR — GET https://target.com/api/v1/accounts/{id} **[HIGH]**
+**CWE:** CWE-639 (Authorization Bypass Through User-Controlled Key)
+**Confidence:** Likely — deterministic pattern match + LLM analysis (no active exploitation)
+**Endpoint:** GET https://target.com/api/v1/accounts/{id}
+**Parameters:** id (path)
+**Auth:** requires_auth
+
+**Evidence:**
+Endpoint returns full account details including balance, email, SSN when accessed \
+with any valid session token. No ownership check on the `id` parameter.
+
+**Attack Scenario:**
+1. Attacker authenticates as user A and receives session token
+2. Attacker sends GET /api/v1/accounts/78432 with their own session token
+3. Server returns victim's account details (balance, email, SSN) without verifying ownership
+
+**Impact:**
+Any authenticated user can read any other user's financial data by iterating account IDs \
+at GET /api/v1/accounts/{id}. Exposed fields: balance, email, SSN.
+
+**Remediation:**
+Add server-side ownership check in the /api/v1/accounts/{id} handler: verify that the \
+authenticated user's ID matches the requested account's owner_id before returning data. \
+Return 403 if mismatch.
+
+**Test Command:**
+```
+curl https://target.com/api/v1/accounts/78432 -H "Authorization: Bearer eyJhbG..."
+```
+
+NOTE: id is a PATH parameter so the value 78432 goes in the URL, not in a header or body. \
+Always match parameter location (path/query/body) to the curl structure. \
+Use concrete example values, not bare <placeholders>."""
 
 
 def _format_auth_status(ep: Endpoint) -> str | None:
@@ -125,27 +166,6 @@ def _format_auth_status(ep: Endpoint) -> str | None:
     if ep.requires_auth is False:
         return "no_auth"
     return None
-
-
-def _format_finding(f: Finding, state: ScanState | None = None) -> str:
-    """Format a single finding as a context line for the LLM."""
-    validated_tag = ""
-    if f.validated is True:
-        validated_tag = " [VALIDATED]"
-    elif f.validated is False:
-        validated_tag = " [REFUTED]"
-
-    line = (
-        f"- [{f.severity.value.upper()}]{validated_tag} {f.title}\n"
-        f"  Detail: {f.detail}"
-    )
-    if f.evidence:
-        line += f"\n  Evidence: {f.evidence}"
-
-    if state is not None:
-        line += _endpoint_context_for_finding(f, state)
-
-    return line
 
 
 def _endpoint_context_for_finding(f: Finding, state: ScanState) -> str:
@@ -226,27 +246,523 @@ def _format_indicator_lines(indicators: list[VulnIndicator]) -> str:
     return "\n".join(lines)
 
 
+_METADATA_PATH_PREFIXES = ("/latest/meta-data", "/latest/api/token")
+_MALFORMED_URL_CHARS = set(',;"\'<>{}')
+
+
+def _is_valid_surface_entry(entry: AttackSurfaceEntry) -> bool:
+    """Filter out malformed URLs and misclassified internal paths."""
+    url = entry.endpoint.url
+    if _MALFORMED_URL_CHARS & set(url):
+        return False
+    path = urlparse(url).path
+    for prefix in _METADATA_PATH_PREFIXES:
+        if path.startswith(prefix):
+            return False
+    return True
+
+
 def _build_attack_surface_table(state: ScanState) -> str:
-    """Format top attack surface entries as a markdown table."""
+    """Format attack surface entries as a markdown table."""
     if not state.attack_surface:
         return ""
     rows = [
         "| # | Risk | Method | URL | Category | Indicators |",
         "|----|------|--------|-----|----------|------------|",
     ]
+    rank = 0
     for entry in state.attack_surface:
+        if not _is_valid_surface_entry(entry):
+            continue
+        rank += 1
         vulns = ", ".join(
-            v.pattern.value for v in entry.vuln_indicators
+            dict.fromkeys(v.pattern.value for v in entry.vuln_indicators)
         )
         rows.append(
-            f"| {entry.priority_rank} "
+            f"| {rank} "
             f"| {entry.risk_level.value.upper()} "
             f"| {entry.endpoint.method} "
             f"| {entry.endpoint.url} "
             f"| {entry.category.value} "
             f"| {vulns or 'none'} |"
         )
+    if rank == 0:
+        return ""
     return "\n".join(rows)
+
+
+def _lookup_cwe_for_finding(f: Finding) -> str:
+    """Map a finding's type or title to a CWE reference string.
+
+    Checks finding_type (stripping 'vuln_' prefix) then falls back to
+    keyword matching against the title.
+    """
+    finding_type = f.finding_type.removeprefix("vuln_")
+
+    if finding_type in CWE_REFERENCES:
+        return CWE_REFERENCES[finding_type]
+
+    title_lower = f.title.lower()
+    for pattern, cwe in CWE_REFERENCES.items():
+        if pattern.replace("_", " ") in title_lower:
+            return cwe
+
+    return ""
+
+
+def _lookup_tests_for_finding(f: Finding, state: ScanState) -> list[str]:
+    """Cross-reference a finding with attack surface to find suggested tests."""
+    ep = _lookup_endpoint_from_finding(f, state)
+    if ep is None:
+        return []
+
+    for entry in state.attack_surface:
+        if entry.endpoint.url == ep.url and entry.endpoint.method == ep.method:
+            return entry.suggested_tests
+
+    return []
+
+
+def _format_finding_enriched(f: Finding, state: ScanState | None = None) -> str:
+    """Format a single finding with CWE, tests, and verification status."""
+    validated_tag = ""
+    if f.validated is True:
+        validated_tag = " [VALIDATED]"
+    elif f.validated is False:
+        validated_tag = " [REFUTED]"
+
+    cwe = _lookup_cwe_for_finding(f)
+    cwe_tag = f" | {cwe}" if cwe else ""
+
+    line = (
+        f"- [{f.severity.value.upper()}]{validated_tag}{cwe_tag} {f.title}\n"
+        f"  Detail: {f.detail}"
+    )
+    if f.evidence:
+        line += f"\n  Evidence: {f.evidence}"
+
+    if f.verification_status:
+        line += f"\n  Verification: {f.verification_status}"
+        if f.verification_note:
+            line += f" — {f.verification_note}"
+
+    if state is not None:
+        line += _endpoint_context_for_finding(f, state)
+        tests = _lookup_tests_for_finding(f, state)
+        if tests:
+            line += f"\n  Suggested tests: {' | '.join(tests)}"
+
+    return line
+
+
+def _build_enriched_findings(state: ScanState) -> str:
+    """Group findings by severity with CWE, tests, and verification info."""
+    severity_order = [
+        RiskLevel.CRITICAL, RiskLevel.HIGH, RiskLevel.MEDIUM,
+        RiskLevel.LOW, RiskLevel.INFO,
+    ]
+    groups: dict[RiskLevel, list[Finding]] = {}
+    for f in state.findings:
+        groups.setdefault(f.severity, []).append(f)
+
+    sections: list[str] = []
+    for sev in severity_order:
+        findings = groups.get(sev, [])
+        if not findings:
+            continue
+        header = (
+            f"FINDINGS — {sev.value.upper()} ({len(findings)} total)"
+            f" — INCLUDE ALL IN REPORT"
+        )
+        lines = [header]
+        for f in findings:
+            lines.append(_format_finding_enriched(f, state))
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+def _build_strategy_section(state: ScanState) -> str:
+    """Format planner strategy and scan insights."""
+    lines: list[str] = []
+
+    if state.scan_strategy:
+        s = state.scan_strategy
+        lines.append("SCAN STRATEGY (from planner agent):")
+        if s.focus_areas:
+            lines.append(f"  Focus areas: {', '.join(s.focus_areas)}")
+        if s.tech_hypotheses:
+            lines.append(f"  Tech hypotheses: {', '.join(s.tech_hypotheses)}")
+        lines.append(f"  Scan depth: {s.scan_depth}")
+        if s.priority_patterns:
+            lines.append(f"  Priority patterns: {', '.join(s.priority_patterns)}")
+
+    insights = state.insights_context()
+    if insights and insights != "No prior insights.":
+        lines.append(f"\nSCAN INSIGHTS:\n{insights}")
+
+    return "\n".join(lines)
+
+
+def _build_chain_analysis(state: ScanState) -> str:
+    """Find explicit (chain_id) and implicit (multi-pattern) vuln chains."""
+    chains: dict[str, list[tuple[str, VulnIndicator]]] = {}
+    for ep_key, indicators in state.vuln_indicators.items():
+        for ind in indicators:
+            if ind.chain_id and not ind.suppressed:
+                chains.setdefault(ind.chain_id, []).append((ep_key, ind))
+
+    # implicit: same endpoint with 2+ different high-severity patterns
+    implicit: list[tuple[str, list[VulnIndicator]]] = []
+    explicit_pairs = {
+        (ep_key, ind.pattern.value)
+        for members in chains.values()
+        for ep_key, ind in members
+    }
+
+    for ep_key, indicators in state.vuln_indicators.items():
+        high_sev = [
+            ind for ind in indicators
+            if not ind.suppressed
+            and ind.confidence in (RiskLevel.CRITICAL, RiskLevel.HIGH)
+            and (ep_key, ind.pattern.value) not in explicit_pairs
+        ]
+        patterns = {ind.pattern for ind in high_sev}
+        if len(patterns) >= 2:
+            implicit.append((ep_key, high_sev))
+
+    if not chains and not implicit:
+        return ""
+
+    lines = ["VULNERABILITY CHAINS:"]
+
+    for chain_id, members in chains.items():
+        endpoints = sorted({ep_key for ep_key, _ in members})
+        patterns = [ind.pattern.value for _, ind in members]
+        lines.append(f"\nChain {chain_id}:")
+        lines.append(f"  Endpoints: {', '.join(endpoints)}")
+        lines.append(f"  Patterns: {' → '.join(patterns)}")
+        for ep_key, ind in members:
+            lines.append(
+                f"  - [{ind.confidence.value.upper()}] "
+                f"{ind.pattern.value} at {ep_key}: {ind.evidence}"
+            )
+
+    for ep_key, indicators in implicit:
+        patterns = sorted({ind.pattern.value for ind in indicators})
+        lines.append(f"\nImplicit chain at {ep_key}:")
+        lines.append(f"  Patterns: {', '.join(patterns)}")
+        for ind in indicators:
+            lines.append(
+                f"  - [{ind.confidence.value.upper()}] "
+                f"{ind.pattern.value}: {ind.evidence}"
+            )
+
+    return "\n".join(lines)
+
+
+def _build_section_instructions(state: ScanState) -> str:
+    """Build the section list for the LLM based on what data is available."""
+    severity_counts: dict[str, int] = {}
+    for f in state.findings:
+        sev = f.severity.value.upper()
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    critical_high = severity_counts.get("CRITICAL", 0) + severity_counts.get("HIGH", 0)
+
+    lines = [
+        "REPORT SECTIONS (generate in this order):",
+        "1. ## Executive Summary — 3-5 sentences: scope, findings count by severity, "
+        "overall risk, most critical discovery.",
+        "2. ## Scope & Limitations — What was tested (passive recon, crawling, API spec "
+        "parsing, JS analysis, pattern matching, LLM analysis). What was NOT tested: "
+        "authenticated endpoint behavior, business logic beyond crawlable paths, "
+        "rate limiting, DoS.",
+    ]
+
+    if state.scan_strategy:
+        lines.append(
+            "3. ## Methodology — Agents that ran, planner strategy assessment, "
+            "techniques used. Include scan depth and focus areas."
+        )
+    else:
+        lines.append("3. ## Methodology — Agents that ran, techniques used.")
+
+    lines.append(
+        "4. ## Target Profile — Technology fingerprint, frameworks, security headers."
+    )
+    lines.append(
+        f"5. ## Critical & High Findings — ALL {critical_high} critical+high findings. "
+        f"Each needs: CWE, confidence, endpoint, evidence, attack scenario "
+        f"(numbered steps), impact, remediation, test command."
+    )
+
+    medium_low = severity_counts.get("MEDIUM", 0) + severity_counts.get("LOW", 0)
+    if medium_low:
+        lines.append(
+            f"6. ## Medium & Low Findings — Summarize {medium_low} remaining findings."
+        )
+
+    lines.extend([
+        "7. ## Attack Surface Map — Write ONLY a brief summary paragraph. "
+        "The table will be auto-inserted.",
+        "8. ## Vulnerability Pattern Analysis — Distribution, chained vulns, "
+        "LLM-enhanced vs deterministic, suppressed false positives.",
+        "9. ## Recommendations — Prioritized roadmap: immediate (critical), "
+        "short-term (high), medium-term (medium).",
+    ])
+
+    return "\n".join(lines)
+
+
+def _build_attack_surface_context(state: ScanState, limit: int = 25) -> str:
+    """Format top attack surface entries as text for the LLM context."""
+    if not state.attack_surface:
+        return ""
+
+    surface_lines: list[str] = []
+    for entry in state.attack_surface[:limit]:
+        ep = entry.endpoint
+        auth = _format_auth_status(ep) or "auth_unknown"
+        params = ", ".join(ep.parameters) if ep.parameters else "none"
+        resp_fields = ", ".join(ep.response_fields) if ep.response_fields else "none"
+        tests = " | ".join(entry.suggested_tests)
+
+        block = (
+            f"#{entry.priority_rank} [{entry.risk_level.value.upper()}] "
+            f"{ep.method} {ep.url}\n"
+            f"  Category: {entry.category.value} | Auth: {auth}\n"
+            f"  Params: {params}\n"
+            f"  Response fields: {resp_fields}"
+        )
+
+        if entry.vuln_indicators:
+            block += "\n  Indicators:\n" + _format_indicator_lines(
+                entry.vuln_indicators
+            )
+
+        block += f"\n  Rationale: {entry.rationale}"
+        block += f"\n  Tests: {tests or 'none'}"
+        surface_lines.append(block)
+
+    total = len(state.attack_surface)
+    header = f"ATTACK SURFACE (top {min(limit, total)} of {total}):"
+    return header + "\n" + "\n".join(surface_lines)
+
+
+def _build_vuln_pattern_summary(state: ScanState) -> str:
+    """Summarise vulnerability indicator distribution."""
+    pattern_counts: dict[str, int] = {}
+    suppressed_count = 0
+    llm_enhanced_count = 0
+    all_indicators = itertools.chain.from_iterable(state.vuln_indicators.values())
+    for ind in all_indicators:
+        if ind.suppressed:
+            suppressed_count += 1
+            continue
+        pattern_counts[ind.pattern.value] = (
+            pattern_counts.get(ind.pattern.value, 0) + 1
+        )
+        if ind.llm_enhanced:
+            llm_enhanced_count += 1
+
+    distribution = ", ".join(
+        f"{v} {k}"
+        for k, v in sorted(pattern_counts.items(), key=lambda x: -x[1])
+    )
+    return (
+        f"VULNERABILITY PATTERN SUMMARY:\n"
+        f"Total active indicators: {sum(pattern_counts.values())}\n"
+        f"Suppressed (false positives): {suppressed_count}\n"
+        f"LLM-enhanced: {llm_enhanced_count}\n"
+        f"Distribution: {distribution}"
+    )
+
+
+def _insert_section_before_anchor(
+    report: str,
+    header: str,
+    body: str,
+    anchors: tuple[str, ...],
+) -> str:
+    """Insert a new section before the first matching anchor, or append at end."""
+    for anchor in anchors:
+        pos = report.find(anchor)
+        if pos != -1:
+            return report[:pos] + f"{header}\n\n{body}\n\n" + report[pos:]
+    return report + f"\n\n{header}\n\n{body}\n"
+
+
+def _splice_deterministic_table(report: str, state: ScanState) -> str:
+    """Replace any LLM-generated attack surface table with the deterministic one."""
+    table = _build_attack_surface_table(state)
+    if not table:
+        return report
+
+    marker = "## Attack Surface Map"
+    idx = report.find(marker)
+
+    if idx == -1:
+        return _insert_section_before_anchor(
+            report, marker, table,
+            anchors=("## Recommendations", "## Vulnerability Pattern"),
+        )
+
+    end_of_header = report.find("\n", idx)
+    if end_of_header == -1:
+        end_of_header = len(report)
+
+    next_section = report.find("\n## ", end_of_header)
+    if next_section == -1:
+        return report[:end_of_header] + f"\n\n{table}\n"
+
+    return (
+        report[:end_of_header]
+        + f"\n\n{table}\n"
+        + report[next_section:]
+    )
+
+
+_TAIL_SECTION_MARKERS = (
+    "## Attack Surface Map",
+    "## Vulnerability Pattern",
+    "## Recommendations",
+)
+
+
+def _find_tail_section(report: str) -> int:
+    """Find the position of the first tail section marker, or -1."""
+    for marker in _TAIL_SECTION_MARKERS:
+        idx = report.find(marker)
+        if idx != -1:
+            return idx
+    return -1
+
+
+def _augment_report(report: str, state: ScanState) -> str:
+    """Post-LLM quality fixes: deterministic table, missing findings, base URL."""
+    report = _append_missing_findings(report, state)
+    report = _splice_deterministic_table(report, state)
+    report = _ensure_base_url(report, state)
+    return report
+
+
+_SEVERITY_RANK = {
+    RiskLevel.CRITICAL: 0,
+    RiskLevel.HIGH: 1,
+    RiskLevel.MEDIUM: 2,
+    RiskLevel.LOW: 3,
+    RiskLevel.INFO: 4,
+}
+
+_AUTH_PATH_KEYWORDS = ("/login", "/auth", "/token", "/signin", "/register", "/oauth")
+
+
+def _is_login_token_false_positive(f: Finding) -> bool:
+    """Detect excessive_data_exposure findings that flag normal auth tokens."""
+    if f.finding_type not in ("excessive_data_exposure", "vuln_excessive_data_exposure"):
+        return False
+    title_lower = f.title.lower()
+    return any(kw in title_lower for kw in _AUTH_PATH_KEYWORDS)
+
+
+def _append_missing_findings(report: str, state: ScanState) -> str:
+    """Insert missing critical/high findings grouped by endpoint.
+
+    Multiple findings for the same endpoint are merged into one entry.
+    The section is placed right after the LLM's Critical & High Findings
+    section (before Attack Surface Map) to keep all findings together.
+    """
+    critical_high = [
+        f for f in state.findings
+        if f.severity in (RiskLevel.CRITICAL, RiskLevel.HIGH)
+        and not _is_login_token_false_positive(f)
+    ]
+    if not critical_high:
+        return report
+
+    cut = _find_tail_section(report)
+    check_region = report[:cut] if cut != -1 else report
+
+    missing: list[Finding] = []
+    for f in critical_high:
+        ep = _lookup_endpoint_from_finding(f, state)
+        url = ep.url if ep else ""
+        if f.title not in check_region and (not url or url not in check_region):
+            missing.append(f)
+
+    if not missing:
+        return report
+
+    # group by endpoint so each URL appears once
+    grouped: dict[str, list[Finding]] = {}
+    for f in missing:
+        ep = _lookup_endpoint_from_finding(f, state)
+        key = f"{ep.method} {ep.url}" if ep else f.title
+        grouped.setdefault(key, []).append(f)
+
+    section = "\n\n### Additional Critical & High Findings\n\n"
+    section += "*The following findings were not fully detailed above:*\n\n"
+
+    for ep_key, findings in grouped.items():
+        worst = min(
+            findings,
+            key=lambda x: _SEVERITY_RANK.get(x.severity, len(_SEVERITY_RANK)),
+        )
+        sev = worst.severity.value.upper()
+
+        types = list(dict.fromkeys(f.finding_type for f in findings))
+        type_label = ", ".join(
+            t.removeprefix("vuln_").replace("_", " ") for t in types
+        )
+
+        cwe_parts = list(dict.fromkeys(
+            cwe for f in findings
+            if (cwe := _lookup_cwe_for_finding(f))
+        ))
+        cwe_text = f" | {'; '.join(cwe_parts)}" if cwe_parts else ""
+
+        section += f"- **[{sev}]** {ep_key} — {type_label}{cwe_text}\n"
+
+        evidences = list(dict.fromkeys(
+            f.evidence for f in findings if f.evidence
+        ))
+        if evidences:
+            section += f"  Evidence: {'; '.join(evidences)}\n"
+
+        for f in findings:
+            tests = _lookup_tests_for_finding(f, state)
+            if tests:
+                section += f"  Test: {tests[0]}\n"
+                break
+
+    insert_before = _find_tail_section(report)
+
+    if insert_before != -1:
+        report = report[:insert_before] + section + "\n" + report[insert_before:]
+    else:
+        report += section
+
+    return report
+
+
+def _ensure_base_url(report: str, state: ScanState) -> str:
+    """Add base URL near the top of the report if it's not already present."""
+    if state.base_url in report:
+        return report
+
+    exec_idx = report.find("## Executive Summary")
+    if exec_idx != -1:
+        end_of_line = report.find("\n", exec_idx)
+        if end_of_line != -1:
+            report = (
+                report[:end_of_line + 1]
+                + f"\n**Base URL:** {state.base_url}\n"
+                + report[end_of_line + 1:]
+            )
+            return report
+
+    return f"**Base URL:** {state.base_url}\n\n" + report
 
 
 def _build_report_context(state: ScanState, duration: float) -> str:
@@ -264,64 +780,31 @@ def _build_report_context(state: ScanState, duration: float) -> str:
         f"ATTACK SURFACE ENTRIES: {len(state.attack_surface)}"
     )
 
+    strategy = _build_strategy_section(state)
+    if strategy:
+        sections.append(strategy)
+
     tech_block = _build_tech_fingerprint_section(state)
     if tech_block:
         sections.append("TECH FINGERPRINT:\n" + tech_block)
 
-    findings_lines = [_format_finding(f, state) for f in state.findings]
-    if findings_lines:
-        sections.append("ALL FINDINGS:\n" + "\n".join(findings_lines))
+    sections.append(_FINDING_EXAMPLE)
 
-    surface_lines = []
-    for entry in state.attack_surface:
-        ep = entry.endpoint
-        auth = _format_auth_status(ep) or "auth_unknown"
-        params = ", ".join(ep.parameters) if ep.parameters else "none"
-        resp_fields = ", ".join(ep.response_fields) if ep.response_fields else "none"
-        tests = " | ".join(entry.suggested_tests)
+    enriched = _build_enriched_findings(state)
+    if enriched:
+        sections.append(enriched)
 
-        block = (
-            f"#{entry.priority_rank} [{entry.risk_level.value.upper()}] "
-            f"{ep.method} {ep.url}\n"
-            f"  Category: {entry.category.value} | Auth: {auth}\n"
-            f"  Params: {params}\n"
-            f"  Response fields: {resp_fields}"
-        )
+    chains = _build_chain_analysis(state)
+    if chains:
+        sections.append(chains)
 
-        if entry.vuln_indicators:
-            block += "\n  Indicators:\n" + _format_indicator_lines(entry.vuln_indicators)
+    surface = _build_attack_surface_context(state)
+    if surface:
+        sections.append(surface)
 
-        block += f"\n  Rationale: {entry.rationale}"
-        block += f"\n  Tests: {tests or 'none'}"
-        surface_lines.append(block)
-
-    if surface_lines:
-        sections.append("ATTACK SURFACE:\n" + "\n".join(surface_lines))
-
-    pattern_counts: dict[str, int] = {}
-    suppressed_count = 0
-    llm_enhanced_count = 0
-    all_indicators = itertools.chain.from_iterable(state.vuln_indicators.values())
-    for ind in all_indicators:
-        if ind.suppressed:
-            suppressed_count += 1
-            continue
-        pattern_counts[ind.pattern.value] = pattern_counts.get(ind.pattern.value, 0) + 1
-        if ind.llm_enhanced:
-            llm_enhanced_count += 1
-
-    distribution = ", ".join(
-        f"{v} {k}" for k, v in sorted(pattern_counts.items(), key=lambda x: -x[1])
-    )
-    sections.append(
-        f"VULNERABILITY PATTERN SUMMARY:\n"
-        f"Total active indicators: {sum(pattern_counts.values())}\n"
-        f"Suppressed (false positives): {suppressed_count}\n"
-        f"LLM-enhanced: {llm_enhanced_count}\n"
-        f"Distribution: {distribution}"
-    )
-
+    sections.append(_build_vuln_pattern_summary(state))
     sections.append(_build_cwe_reference_block())
+    sections.append(_build_section_instructions(state))
 
     return "\n\n---\n\n".join(sections)
 
@@ -349,9 +832,16 @@ def _build_fallback_report(state: ScanState, duration: float) -> str:
     if critical_high:
         parts.append("\n## Critical & High Findings\n")
         for f in critical_high:
-            parts.append(f"\n- **[{f.severity.value.upper()}]** {f.title}: {f.detail}")
+            cwe = _lookup_cwe_for_finding(f)
+            cwe_text = f" | {cwe}" if cwe else ""
+            parts.append(
+                f"\n- **[{f.severity.value.upper()}]** {f.title}{cwe_text}: {f.detail}"
+            )
             if f.evidence:
                 parts.append(f"  Evidence: {f.evidence}")
+            tests = _lookup_tests_for_finding(f, state)
+            if tests:
+                parts.append(f"  Tests: {' | '.join(tests)}")
 
     surface_table = _build_attack_surface_table(state)
     if surface_table:
@@ -395,7 +885,8 @@ async def generate_report(
             temperature=0.3,
         )
 
-        Path(filename).write_text(response.content)
+        report = _augment_report(response.content, state)
+        Path(filename).write_text(report)
         logger.info("Report written to %s", filename)
         return filename
 
