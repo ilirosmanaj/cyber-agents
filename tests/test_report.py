@@ -552,6 +552,24 @@ class TestBuildEnrichedFindings:
         state = _minimal_state()
         assert _build_enriched_findings(state) == ""
 
+    def test_login_token_excluded(self):
+        """Token in /login response is normal — don't send it to the LLM."""
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            findings=[
+                Finding(
+                    agent_name="test",
+                    finding_type="excessive_data_exposure",
+                    title="EXCESSIVE_DATA_EXPOSURE — POST https://test.com/login",
+                    detail="Token in response",
+                    severity=RiskLevel.HIGH,
+                ),
+            ],
+        )
+        result = _build_enriched_findings(state)
+        assert result == ""
+
 
 # ---- TestBuildChainAnalysis ----
 

@@ -363,6 +363,8 @@ def _build_enriched_findings(state: ScanState) -> str:
     ]
     groups: dict[RiskLevel, list[Finding]] = {}
     for f in state.findings:
+        if _is_login_token_false_positive(f):
+            continue
         groups.setdefault(f.severity, []).append(f)
 
     sections: list[str] = []
