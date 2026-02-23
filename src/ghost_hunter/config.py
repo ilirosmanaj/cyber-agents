@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
 
     # llm defaults
-    llm_temperature: float = 0.2
+    llm_temperature: float = 0.0
     llm_max_tokens: int = 16384
 
     # groq (backward compat — used as fallback if llm_api_key is empty)
@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     proxy: str | None = None
 
     # crawler
-    max_crawl_depth: int = 3
-    max_pages: int = 100
+    max_crawl_depth: int = 5
+    max_pages: int = 200
     max_js_files: int = 50
 
     @property

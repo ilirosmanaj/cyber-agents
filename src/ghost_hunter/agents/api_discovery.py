@@ -24,7 +24,7 @@ from src.ghost_hunter.models import (
 
 logger = logging.getLogger(__name__)
 
-MAX_API_VERSION = 3
+MAX_API_VERSION = 5
 MAX_URLS_FOR_LLM_CONTEXT = 50
 MAX_LLM_GUESSES_TO_VALIDATE = 20
 MAX_CORS_CHECKS = 30

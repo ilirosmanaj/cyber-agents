@@ -18,8 +18,10 @@ from src.ghost_hunter.models import (
 )
 from src.ghost_hunter.report import (
     CWE_REFERENCES,
+    _AGENT_DISPLAY_NAMES,
     _BASE_REPORT_TOKENS,
     _MAX_REPORT_TOKENS,
+    _SNIPPET_MAX_CHARS,
     _TOKENS_PER_FINDING,
     _append_missing_findings,
     _augment_report,
@@ -35,9 +37,14 @@ from src.ghost_hunter.report import (
     _build_tech_fingerprint_section,
     _build_vuln_pattern_summary,
     _compute_max_tokens,
+    _endpoint_context_for_finding,
     _ensure_base_url,
+    _expand_endpoint_lists,
     _format_finding_enriched,
-    _is_login_token_false_positive,
+    _format_finding_group,
+    _is_auth_endpoint_false_positive,
+    _is_expected_behavior,
+    _is_response_denial,
     _lookup_cwe_for_finding,
     _lookup_tests_for_finding,
     _splice_deterministic_table,
@@ -397,6 +404,12 @@ class TestBuildAttackSurfaceTable:
             method="GET",
             discovered_by=DiscoverySource.CRAWL,
         )
+        indicator = VulnIndicator(
+            pattern=VulnPattern.BOLA_IDOR,
+            confidence=RiskLevel.HIGH,
+            evidence="test",
+            description="test",
+        )
         entries = [
             AttackSurfaceEntry(
                 endpoint=bad_ep,
@@ -404,6 +417,7 @@ class TestBuildAttackSurfaceTable:
                 risk_level=RiskLevel.INFO,
                 priority_rank=1,
                 rationale="artifact",
+                vuln_indicators=[indicator],
             ),
             AttackSurfaceEntry(
                 endpoint=good_ep,
@@ -411,6 +425,7 @@ class TestBuildAttackSurfaceTable:
                 risk_level=RiskLevel.HIGH,
                 priority_rank=2,
                 rationale="valid",
+                vuln_indicators=[indicator],
             ),
         ]
         state = ScanState(
@@ -436,6 +451,12 @@ class TestBuildAttackSurfaceTable:
             method="GET",
             discovered_by=DiscoverySource.CRAWL,
         )
+        indicator = VulnIndicator(
+            pattern=VulnPattern.BOLA_IDOR,
+            confidence=RiskLevel.HIGH,
+            evidence="test",
+            description="test",
+        )
         entries = [
             AttackSurfaceEntry(
                 endpoint=real_ep,
@@ -443,6 +464,7 @@ class TestBuildAttackSurfaceTable:
                 risk_level=RiskLevel.HIGH,
                 priority_rank=1,
                 rationale="real",
+                vuln_indicators=[indicator],
             ),
             AttackSurfaceEntry(
                 endpoint=meta_ep,
@@ -450,6 +472,7 @@ class TestBuildAttackSurfaceTable:
                 risk_level=RiskLevel.INFO,
                 priority_rank=2,
                 rationale="aws",
+                vuln_indicators=[indicator],
             ),
         ]
         state = ScanState(
@@ -552,7 +575,7 @@ class TestBuildEnrichedFindings:
         state = _minimal_state()
         assert _build_enriched_findings(state) == ""
 
-    def test_login_token_excluded(self):
+    def test_expected_behavior_excluded(self):
         """Token in /login response is normal — don't send it to the LLM."""
         state = ScanState(
             target="test.com",
@@ -881,7 +904,9 @@ class TestAugmentReport:
         )
         result = _augment_report(report, state)
         assert "Additional Critical & High Findings" in result
-        assert "ssrf" in result
+        assert "SSRF" in result
+        assert "SSRF on fetch endpoint" in result
+        assert "HTTP 200 with internal IP" in result
 
     def test_present_findings_not_duplicated(self):
         """Already-mentioned finding shouldn't be appended twice."""
@@ -926,7 +951,8 @@ class TestAugmentReport:
         )
         result = _augment_report(report, state)
         assert "Additional Critical & High Findings" in result
-        assert "bola idor" in result
+        assert "BOLA IDOR" in result
+        assert "IDOR on user endpoint" in result
 
     def test_appended_findings_include_tests(self):
         """Appended findings should carry their curl commands."""
@@ -946,7 +972,7 @@ class TestAugmentReport:
             "## Recommendations\nFix."
         )
         result = _augment_report(report, state)
-        assert "Test:" in result
+        assert "Test Commands:" in result
         assert "curl" in result
 
     def test_groups_by_endpoint(self):
@@ -982,11 +1008,13 @@ class TestAugmentReport:
             "## Recommendations\nFix."
         )
         result = _augment_report(report, state)
-        # Should have one grouped entry for GET https://test.com/api/accounts
-        assert result.count("GET https://test.com/api/accounts") == 1
-        # Both evidence items should be combined
+        # one #### header + one **Endpoint:** line = 2 occurrences
+        assert result.count("#### ") == 1
+        # both evidence and detail items should be combined
         assert "path contains object ID" in result
         assert "query param id" in result
+        assert "Path param BOLA" in result
+        assert "Query param BOLA" in result
 
     def test_placed_before_attack_surface(self):
         """Additional findings go before the table, not after."""
@@ -1010,7 +1038,7 @@ class TestAugmentReport:
         surface_pos = result.find("## Attack Surface Map")
         assert additional_pos < surface_pos
 
-    def test_login_token_false_positive_filtered(self):
+    def test_expected_behavior_false_positive_filtered(self):
         """Token in /login response is normal — shouldn't be appended."""
         state = _minimal_state()
         state.findings = [
@@ -1048,7 +1076,7 @@ class TestAugmentReport:
 # ---- TestLoginTokenFalsePositive ----
 
 
-class TestLoginTokenFalsePositive:
+class TestExpectedBehavior:
     def test_login_endpoint_flagged(self):
         f = Finding(
             agent_name="test",
@@ -1056,7 +1084,7 @@ class TestLoginTokenFalsePositive:
             title="EXCESSIVE_DATA_EXPOSURE — POST https://test.com/login",
             detail="d",
         )
-        assert _is_login_token_false_positive(f) is True
+        assert _is_expected_behavior(f) is True
 
     def test_auth_endpoint_flagged(self):
         f = Finding(
@@ -1065,7 +1093,7 @@ class TestLoginTokenFalsePositive:
             title="EXCESSIVE_DATA_EXPOSURE — POST https://test.com/api/auth/token",
             detail="d",
         )
-        assert _is_login_token_false_positive(f) is True
+        assert _is_expected_behavior(f) is True
 
     def test_non_auth_endpoint_not_flagged(self):
         f = Finding(
@@ -1074,7 +1102,7 @@ class TestLoginTokenFalsePositive:
             title="EXCESSIVE_DATA_EXPOSURE — GET https://test.com/api/users",
             detail="d",
         )
-        assert _is_login_token_false_positive(f) is False
+        assert _is_expected_behavior(f) is False
 
     def test_non_excessive_data_type_not_flagged(self):
         f = Finding(
@@ -1083,7 +1111,62 @@ class TestLoginTokenFalsePositive:
             title="BOLA_IDOR — POST https://test.com/login",
             detail="d",
         )
-        assert _is_login_token_false_positive(f) is False
+        assert _is_expected_behavior(f) is False
+
+    def test_info_disclosure_on_swagger(self):
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/swagger",
+            detail="API spec exposed",
+        )
+        assert _is_expected_behavior(f) is True
+
+    def test_info_disclosure_on_non_doc_endpoint(self):
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/api/users",
+            detail="Internal IDs leaked",
+        )
+        assert _is_expected_behavior(f) is False
+
+    def test_bola_on_products(self):
+        f = Finding(
+            agent_name="test",
+            finding_type="bola_idor",
+            title="BOLA_IDOR — GET https://test.com/products",
+            detail="Enumerable product list",
+        )
+        assert _is_expected_behavior(f) is True
+
+    def test_bola_on_admin_settings(self):
+        f = Finding(
+            agent_name="test",
+            finding_type="bola_idor",
+            title="BOLA_IDOR — GET https://test.com/admin/settings",
+            detail="Admin settings exposed",
+        )
+        assert _is_expected_behavior(f) is False
+
+    def test_mass_assignment_on_register(self):
+        f = Finding(
+            agent_name="test",
+            finding_type="mass_assignment",
+            title="MASS_ASSIGNMENT — POST https://test.com/register",
+            detail="User-provided fields accepted",
+        )
+        assert _is_expected_behavior(f) is True
+
+    def test_match_via_detail_field(self):
+        """Keyword in detail (not title) should still match."""
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/v1/spec",
+            detail="The /api-docs endpoint returns the full OpenAPI spec",
+        )
+        assert _is_expected_behavior(f) is True
 
 
 # ---- TestEnsureBaseUrl ----
@@ -1183,6 +1266,14 @@ class TestBuildFallbackReport:
             risk_level=RiskLevel.CRITICAL,
             priority_rank=1,
             rationale="admin panel",
+            vuln_indicators=[
+                VulnIndicator(
+                    pattern=VulnPattern.BOLA_IDOR,
+                    confidence=RiskLevel.HIGH,
+                    evidence="test",
+                    description="test",
+                ),
+            ],
         )
         state = ScanState(
             target="test.com",
@@ -1213,7 +1304,9 @@ class TestBuildReportContext:
         context = _build_report_context(state, duration=42.0)
         assert "vulnbank.org" in context
         assert "42.0s" in context
-        assert "passive_recon" in context
+        assert "Passive Reconnaissance" in context
+        assert "Web Crawling" in context
+        assert "passive_recon" not in context
 
     def test_includes_finding_example(self):
         """The few-shot example should be in the prompt context."""
@@ -1290,3 +1383,727 @@ class TestBuildReportContext:
         assert "Params: message" in context
         assert "Auth: requires_auth" in context
         assert "Response fields: response" in context
+
+
+# ---- TestResponseDenial ----
+
+
+def _state_with_endpoint(
+    url: str = "https://test.com/internal/config.json",
+    method: str = "GET",
+    status_code: int | None = 200,
+    response_body_snippet: str = "",
+) -> ScanState:
+    """Create a state with a single endpoint for response denial tests."""
+    ep = Endpoint(
+        url=url,
+        method=method,
+        discovered_by=DiscoverySource.CRAWL,
+        status_code=status_code,
+        response_body_snippet=response_body_snippet,
+    )
+    state = ScanState(target="test.com", base_url="https://test.com")
+    state.add_endpoint(ep)
+    return state
+
+
+def _finding_for_endpoint(
+    url: str = "https://test.com/internal/config.json",
+    method: str = "GET",
+    finding_type: str = "info_disclosure",
+    validated: bool | None = None,
+) -> Finding:
+    return Finding(
+        agent_name="vuln_analyzer",
+        finding_type=finding_type,
+        title=f"INFO_DISCLOSURE — {method} {url}",
+        detail="Sensitive config exposed",
+        severity=RiskLevel.HIGH,
+        validated=validated,
+    )
+
+
+class TestResponseDenial:
+    def test_status_403_filters_finding(self):
+        state = _state_with_endpoint(status_code=403)
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is True
+
+    def test_status_200_not_filtered_by_status_alone(self):
+        state = _state_with_endpoint(status_code=200)
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is False
+
+    def test_status_none_not_filtered(self):
+        state = _state_with_endpoint(status_code=None)
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is False
+
+    def test_denial_phrase_loopback_only(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet='{"error": "Internal resource. Loopback only."}',
+        )
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is True
+
+    def test_denial_phrase_access_denied(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet='{"message": "Access denied"}',
+        )
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is True
+
+    def test_denial_phrase_forbidden(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet="<html><body>Forbidden</body></html>",
+        )
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is True
+
+    def test_benign_response_not_filtered(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet='{"users": [{"id": 1}]}',
+        )
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is False
+
+    def test_incidental_error_word_not_filtered(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet='{"error_count": 0}',
+        )
+        f = _finding_for_endpoint()
+        assert _is_response_denial(f, state) is False
+
+    def test_validated_finding_not_filtered(self):
+        state = _state_with_endpoint(
+            status_code=200,
+            response_body_snippet='{"error": "Access denied"}',
+        )
+        f = _finding_for_endpoint(validated=True)
+        assert _is_response_denial(f, state) is False
+
+    def test_no_endpoint_found_returns_false(self):
+        state = _minimal_state()
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="Some finding without dash separator",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        assert _is_response_denial(f, state) is False
+
+    def test_build_enriched_findings_skips_response_denial(self):
+        """Finding on endpoint that denies access should be excluded."""
+        ep = Endpoint(
+            url="https://test.com/internal/config.json",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            status_code=200,
+            response_body_snippet='{"error": "Internal resource. Loopback only."}',
+        )
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            findings=[
+                Finding(
+                    agent_name="vuln_analyzer",
+                    finding_type="info_disclosure",
+                    title="INFO_DISCLOSURE — GET https://test.com/internal/config.json",
+                    detail="Sensitive config exposed",
+                    severity=RiskLevel.HIGH,
+                ),
+            ],
+        )
+        state.add_endpoint(ep)
+        result = _build_enriched_findings(state)
+        assert result == ""
+
+    def test_augment_report_skips_response_denial(self):
+        """Finding on denial endpoint should not be appended to report."""
+        ep = Endpoint(
+            url="https://test.com/internal/config.json",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            status_code=200,
+            response_body_snippet='{"error": "Internal resource. Loopback only."}',
+        )
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            findings=[
+                Finding(
+                    agent_name="vuln_analyzer",
+                    finding_type="info_disclosure",
+                    title="INFO_DISCLOSURE — GET https://test.com/internal/config.json",
+                    detail="Sensitive config exposed",
+                    severity=RiskLevel.HIGH,
+                ),
+            ],
+        )
+        state.add_endpoint(ep)
+        report = (
+            "## Executive Summary\nhttps://test.com\n\n"
+            "## Recommendations\nFix."
+        )
+        result = _augment_report(report, state)
+        assert "Additional Critical & High Findings" not in result
+        assert "config.json" not in result
+
+
+# ---- TestAgentDisplayNames ----
+
+
+class TestAgentDisplayNames:
+    def test_all_known_agents_mapped(self):
+        """Every key in the mapping should produce a human-readable name."""
+        for key, name in _AGENT_DISPLAY_NAMES.items():
+            assert "_" not in name, f"{key} maps to '{name}' which still has underscores"
+
+    def test_unknown_agent_passes_through(self):
+        """Unmapped agent names should pass through unchanged."""
+        assert _AGENT_DISPLAY_NAMES.get("unknown_agent", "unknown_agent") == "unknown_agent"
+
+    def test_report_context_uses_display_names(self):
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            agents_completed=["passive_recon", "vuln_analyzer", "unknown_agent"],
+        )
+        context = _build_report_context(state, duration=1.0)
+        assert "Passive Reconnaissance" in context
+        assert "Vulnerability Analysis" in context
+        assert "unknown_agent" in context  # unmapped passes through
+        assert "passive_recon" not in context
+
+
+# ---- TestExpandEndpointLists ----
+
+
+class TestExpandEndpointLists:
+    def test_short_list_unchanged(self):
+        """Two or fewer URLs stay inline."""
+        details = ["Endpoints: https://a.com, https://b.com"]
+        result = _expand_endpoint_lists(details)
+        assert result == details
+
+    def test_long_list_becomes_bullets(self):
+        """Three or more URLs get expanded to a bulleted list."""
+        urls = ["https://a.com/1", "https://a.com/2", "https://a.com/3"]
+        details = [f"Endpoints: {', '.join(urls)}"]
+        result = _expand_endpoint_lists(details)
+        assert "**Affected endpoints** (3):" in result
+        for u in urls:
+            assert f"- {u}" in result
+
+    def test_non_endpoint_detail_unchanged(self):
+        """Details without 'Endpoints: ' are left as-is."""
+        details = ["Some other detail about the finding"]
+        assert _expand_endpoint_lists(details) == details
+
+    def test_mixed_details(self):
+        """Mix of endpoint and non-endpoint details."""
+        details = [
+            "CORS misconfiguration detected",
+            "Endpoints: https://a.com/1, https://a.com/2, https://a.com/3, https://a.com/4",
+        ]
+        result = _expand_endpoint_lists(details)
+        assert result[0] == "CORS misconfiguration detected"
+        assert "**Affected endpoints** (4):" in result
+
+
+# ---- TestFindingGroupNumbering ----
+
+
+class TestFindingGroupNumbering:
+    def test_index_appears_in_header(self):
+        """When index is passed, it should prefix the header."""
+        state = _minimal_state()
+        ep = Endpoint(
+            url="https://test.com/api/data",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="vuln_ssrf",
+            title="SSRF — GET https://test.com/api/data",
+            detail="SSRF detected",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/api/data",
+            findings=[f],
+            state=state,
+            index=3,
+        )
+        assert "#### 3. SSRF" in result
+
+    def test_no_index_no_prefix(self):
+        """When index is 0 (default), no number prefix."""
+        state = _minimal_state()
+        f = Finding(
+            agent_name="test",
+            finding_type="vuln_ssrf",
+            title="SSRF — GET https://test.com/api/data",
+            detail="SSRF detected",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/api/data",
+            findings=[f],
+            state=state,
+        )
+        assert "#### SSRF" in result
+        assert "#### 0." not in result
+
+
+# ---- TestFindingGroupResponseSnippet ----
+
+
+class TestFindingGroupResponseSnippet:
+    def test_response_snippet_included(self):
+        """When endpoint has a response body snippet, it shows up."""
+        ep = Endpoint(
+            url="https://test.com/internal/config.json",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            status_code=200,
+            response_body_snippet='{"error": "Internal resource. Loopback only."}',
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/internal/config.json",
+            detail="Config exposed",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/internal/config.json",
+            findings=[f],
+            state=state,
+        )
+        assert "**Response:**" in result
+        assert "Internal resource. Loopback only." in result
+
+    def test_no_snippet_no_response_block(self):
+        """When endpoint has no response snippet, no Response block."""
+        ep = Endpoint(
+            url="https://test.com/api/users",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="vuln_bola_idor",
+            title="BOLA_IDOR — GET https://test.com/api/users",
+            detail="IDOR",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/api/users",
+            findings=[f],
+            state=state,
+        )
+        assert "**Response:**" not in result
+
+
+# ---- TestAttackSurfaceNoIndicatorFilter ----
+
+
+class TestAttackSurfaceNoIndicatorFilter:
+    def test_no_indicators_filtered(self):
+        """Entries with no vuln_indicators should be excluded from the table."""
+        ep_with = Endpoint(
+            url="https://test.com/api/accounts",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        ep_without = Endpoint(
+            url="https://test.com/static/logo.png",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entries = [
+            AttackSurfaceEntry(
+                endpoint=ep_with,
+                category=EndpointCategory.REST_API,
+                risk_level=RiskLevel.HIGH,
+                priority_rank=1,
+                rationale="IDOR candidate",
+                vuln_indicators=[
+                    VulnIndicator(
+                        pattern=VulnPattern.BOLA_IDOR,
+                        confidence=RiskLevel.HIGH,
+                        evidence="test",
+                        description="test",
+                    ),
+                ],
+            ),
+            AttackSurfaceEntry(
+                endpoint=ep_without,
+                category=EndpointCategory.UNKNOWN,
+                risk_level=RiskLevel.INFO,
+                priority_rank=2,
+                rationale="static asset",
+            ),
+        ]
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            attack_surface=entries,
+        )
+        table = _build_attack_surface_table(state)
+        assert "/api/accounts" in table
+        assert "logo.png" not in table
+        assert "| 1 " in table
+        # Only one data row
+        assert "| 2 " not in table
+
+    def test_all_no_indicators_returns_empty(self):
+        """If all entries lack indicators, table is empty."""
+        ep = Endpoint(
+            url="https://test.com/docs",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=ep,
+            category=EndpointCategory.UNKNOWN,
+            risk_level=RiskLevel.INFO,
+            priority_rank=1,
+            rationale="docs",
+        )
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            attack_surface=[entry],
+        )
+        assert _build_attack_surface_table(state) == ""
+
+
+# ---- TestSectionInstructionsTechniques ----
+
+
+class TestSectionInstructionsTechniques:
+    def test_no_agents_keyword(self):
+        """Section instructions should say 'Techniques used', not 'Agents that ran'."""
+        state = _minimal_state()
+        result = _build_section_instructions(state)
+        assert "Techniques used" in result
+        assert "Agents that ran" not in result
+
+    def test_with_strategy(self):
+        state = _minimal_state()
+        state.scan_strategy = ScanStrategy(focus_areas=["auth"])
+        result = _build_section_instructions(state)
+        assert "Techniques used" in result
+        assert "Agents that ran" not in result
+
+
+# ---- TestAuthEndpointFalsePositive ----
+
+
+class TestAuthEndpointFalsePositive:
+    def test_auth_with_only_excessive_data_exposure(self):
+        """Auth endpoint with only excessive_data_exposure is a false positive."""
+        ep = Endpoint(
+            url="https://test.com/login",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=ep,
+            category=EndpointCategory.AUTH_ENDPOINT,
+            risk_level=RiskLevel.CRITICAL,
+            priority_rank=1,
+            rationale="auth",
+            vuln_indicators=[
+                VulnIndicator(
+                    pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                    confidence=RiskLevel.HIGH,
+                    evidence="token in response",
+                    description="d",
+                ),
+            ],
+        )
+        assert _is_auth_endpoint_false_positive(entry) is True
+
+    def test_auth_with_mixed_indicators_not_filtered(self):
+        """Auth endpoint with other indicators besides excessive_data_exposure stays."""
+        ep = Endpoint(
+            url="https://test.com/login",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=ep,
+            category=EndpointCategory.AUTH_ENDPOINT,
+            risk_level=RiskLevel.CRITICAL,
+            priority_rank=1,
+            rationale="auth",
+            vuln_indicators=[
+                VulnIndicator(
+                    pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                    confidence=RiskLevel.HIGH,
+                    evidence="token in response",
+                    description="d",
+                ),
+                VulnIndicator(
+                    pattern=VulnPattern.BOLA_IDOR,
+                    confidence=RiskLevel.HIGH,
+                    evidence="user id",
+                    description="d",
+                ),
+            ],
+        )
+        assert _is_auth_endpoint_false_positive(entry) is False
+
+    def test_non_auth_category_not_filtered(self):
+        """REST API endpoint with only excessive_data_exposure is NOT a false positive."""
+        ep = Endpoint(
+            url="https://test.com/api/users",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=ep,
+            category=EndpointCategory.REST_API,
+            risk_level=RiskLevel.HIGH,
+            priority_rank=1,
+            rationale="data leak",
+            vuln_indicators=[
+                VulnIndicator(
+                    pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                    confidence=RiskLevel.HIGH,
+                    evidence="SSN in response",
+                    description="d",
+                ),
+            ],
+        )
+        assert _is_auth_endpoint_false_positive(entry) is False
+
+    def test_filtered_from_attack_surface_table(self):
+        """Auth false positive should not appear in the deterministic table."""
+        login_ep = Endpoint(
+            url="https://test.com/login",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        api_ep = Endpoint(
+            url="https://test.com/api/accounts",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entries = [
+            AttackSurfaceEntry(
+                endpoint=login_ep,
+                category=EndpointCategory.AUTH_ENDPOINT,
+                risk_level=RiskLevel.CRITICAL,
+                priority_rank=1,
+                rationale="auth",
+                vuln_indicators=[
+                    VulnIndicator(
+                        pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                        confidence=RiskLevel.HIGH,
+                        evidence="token",
+                        description="d",
+                    ),
+                ],
+            ),
+            AttackSurfaceEntry(
+                endpoint=api_ep,
+                category=EndpointCategory.REST_API,
+                risk_level=RiskLevel.HIGH,
+                priority_rank=2,
+                rationale="IDOR",
+                vuln_indicators=[
+                    VulnIndicator(
+                        pattern=VulnPattern.BOLA_IDOR,
+                        confidence=RiskLevel.HIGH,
+                        evidence="id param",
+                        description="d",
+                    ),
+                ],
+            ),
+        ]
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            attack_surface=entries,
+        )
+        table = _build_attack_surface_table(state)
+        assert "/login" not in table
+        assert "/api/accounts" in table
+        assert "| 1 " in table
+        assert "| 2 " not in table
+
+    def test_filtered_from_attack_surface_context(self):
+        """Auth false positive should not appear in the LLM context."""
+        login_ep = Endpoint(
+            url="https://test.com/login",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=login_ep,
+            category=EndpointCategory.AUTH_ENDPOINT,
+            risk_level=RiskLevel.CRITICAL,
+            priority_rank=1,
+            rationale="auth",
+            vuln_indicators=[
+                VulnIndicator(
+                    pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+                    confidence=RiskLevel.HIGH,
+                    evidence="token",
+                    description="d",
+                ),
+            ],
+        )
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            attack_surface=[entry],
+        )
+        context = _build_attack_surface_context(state)
+        assert "/login" not in context
+
+
+# ---- TestSnippetTruncation ----
+
+
+class TestSnippetTruncation:
+    def test_short_snippet_unchanged_in_finding_group(self):
+        """Snippets under the limit are displayed as-is."""
+        ep = Endpoint(
+            url="https://test.com/api/data",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            response_body_snippet='{"ok": true}',
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/api/data",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/api/data",
+            findings=[f],
+            state=state,
+        )
+        assert '{"ok": true}' in result
+        assert "..." not in result
+
+    def test_long_snippet_truncated_in_finding_group(self):
+        """Snippets over _SNIPPET_MAX_CHARS are truncated for non-info_disclosure."""
+        long_html = "<html>" + "x" * (_SNIPPET_MAX_CHARS + 100) + "</html>"
+        ep = Endpoint(
+            url="https://test.com/api/data",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            response_body_snippet=long_html,
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="bola_idor",
+            title="BOLA_IDOR — GET https://test.com/api/data",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/api/data",
+            findings=[f],
+            state=state,
+        )
+        assert "**Response:**" in result
+        assert "..." in result
+        assert "</html>" not in result
+
+    def test_info_disclosure_shows_full_snippet(self):
+        """Info disclosure findings show up to 8000 chars (includes secrets in debug console)."""
+        from src.ghost_hunter.report import _SNIPPET_MAX_CHARS_INFO_DISCLOSURE
+
+        # Snippet longer than default 300 but under info_disclosure limit
+        snippet_with_secret = "<html><title>Werkzeug Debugger</title><script>SECRET=abc123</script></html>"
+        ep = Endpoint(
+            url="https://test.com/console",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            response_body_snippet=snippet_with_secret,
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/console",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding_group(
+            ep_key="GET https://test.com/console",
+            findings=[f],
+            state=state,
+        )
+        assert "SECRET=abc123" in result
+        assert "..." not in result
+
+    def test_long_snippet_truncated_in_endpoint_context(self):
+        """Snippets sent to the LLM via _endpoint_context_for_finding are truncated."""
+        long_snippet = "A" * (_SNIPPET_MAX_CHARS + 200)
+        ep = Endpoint(
+            url="https://test.com/console",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            response_body_snippet=long_snippet,
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/console",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        result = _endpoint_context_for_finding(f, state)
+        assert "..." in result
+        assert len(result) < len(long_snippet)
+
+    def test_exact_limit_not_truncated(self):
+        """Snippet exactly at _SNIPPET_MAX_CHARS should not be truncated."""
+        exact_snippet = "B" * _SNIPPET_MAX_CHARS
+        ep = Endpoint(
+            url="https://test.com/api/info",
+            method="GET",
+            discovered_by=DiscoverySource.CRAWL,
+            response_body_snippet=exact_snippet,
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="test",
+            finding_type="info_disclosure",
+            title="INFO_DISCLOSURE — GET https://test.com/api/info",
+            detail="d",
+            severity=RiskLevel.HIGH,
+        )
+        result = _endpoint_context_for_finding(f, state)
+        assert "..." not in result
+        assert exact_snippet in result
