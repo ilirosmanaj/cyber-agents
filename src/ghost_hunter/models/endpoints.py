@@ -56,6 +56,8 @@ class Finding(BaseModel):
     evidence: str = ""
     validated: bool | None = None  # None=untested, True=confirmed, False=refuted
     validation_evidence: str = ""
+    verification_status: str = ""  # "", "consistent", "conflicting"
+    verification_note: str = ""
 
 
 class TechFingerprint(BaseModel):

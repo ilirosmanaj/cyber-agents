@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from src.ghost_hunter.agents.registry import register_agent
 from src.ghost_hunter.agents.base import BaseAgent
@@ -41,6 +42,15 @@ OPENAPI_PATHS = [
     "/api-docs",
     "/api/swagger.json",
     "/api/openapi.json",
+    "/api/openapi.yaml",
+    "/api/v1/openapi.json",
+    "/api/schema",
+    "/openapi.yaml",
+    "/openapi/v1.json",
+    "/api-docs/swagger.json",
+    "/v1/openapi.json",
+    "/api/documentation",
+    "/api/redoc",
     "/redoc",
 ]
 
@@ -82,11 +92,32 @@ COMMON_API_PATHS = [
     "/actuator",
     "/actuator/health",
     "/console",
-    "/.env",
     "/wp-admin",
     "/wp-login.php",
     "/phpmyadmin",
 ]
+
+# probed separately — not API paths but sensitive file probes
+SENSITIVE_FILE_PATHS = ["/.env", "/.git/config", "/backup.sql", "/dump.sql"]
+
+# framework-specific paths derived from tech fingerprint
+_FRAMEWORK_PATHS: dict[str, list[str]] = {
+    "django": ["/admin/", "/admin/login/", "/__debug__/", "/api/schema/"],
+    "flask": ["/_debug_toolbar/", "/static/", "/api/spec"],
+    "spring": [
+        "/actuator/env", "/actuator/info", "/actuator/beans",
+        "/actuator/mappings", "/actuator/configprops",
+    ],
+    "express": ["/debug", "/api/debug", "/status"],
+    "rails": ["/rails/info/routes", "/rails/mailers"],
+    "laravel": ["/telescope", "/horizon", "/_ignition/health-check"],
+    "wordpress": ["/wp-json/", "/wp-json/wp/v2/posts", "/wp-json/wp/v2/users"],
+}
+
+# GraphQL introspection query
+_GRAPHQL_INTROSPECTION_QUERY = json.dumps({
+    "query": "{ __schema { types { name kind } } }"
+})
 
 
 _PARAM_LOCATION_MAP = {
@@ -106,7 +137,6 @@ def _extract_field_names(
     if not schema or max_depth <= 0:
         return []
 
-    # resolve $ref
     ref = schema.get("$ref", "")
     if ref and definitions:
         ref_name = ref.rsplit("/", 1)[-1]
@@ -121,17 +151,39 @@ def _extract_field_names(
         if prop.get("type") == "object":
             fields.extend(_extract_field_names(prop, definitions, max_depth - 1))
 
-    # allOf / oneOf / anyOf
     for compose_key in ("allOf", "oneOf", "anyOf"):
         for sub in schema.get(compose_key, []):
             fields.extend(_extract_field_names(sub, definitions, max_depth - 1))
 
-    # array items
     items = schema.get("items")
     if isinstance(items, dict):
         fields.extend(_extract_field_names(items, definitions, max_depth - 1))
 
-    return list(dict.fromkeys(fields))  # dedupe preserving order
+    return list(dict.fromkeys(fields))
+
+
+def _extract_server_base_path(spec: dict) -> str:
+    """Extract base path from OpenAPI 3.x servers or Swagger 2.x basePath."""
+    # swagger 2.x
+    base_path = spec.get("basePath", "")
+    if base_path:
+        return base_path
+
+    # openapi 3.x servers
+    servers = spec.get("servers", [])
+    if not servers:
+        return ""
+
+    server_url = servers[0].get("url", "")
+    if not server_url:
+        return ""
+
+    # absolute URL — extract just the path portion
+    if server_url.startswith(("http://", "https://")):
+        return urlparse(server_url).path.rstrip("/")
+
+    # relative path (e.g. "/api/v1")
+    return server_url.rstrip("/")
 
 
 @register_agent
@@ -147,17 +199,29 @@ class APIDiscoveryAgent(BaseAgent):
         findings: list[Finding] = []
         errors: list[str] = []
 
+        strategy_eps = await self._probe_strategy_paths(state)
+        endpoints.extend(strategy_eps)
+
         spec_eps, spec_findings = await self._probe_openapi(state)
         endpoints.extend(spec_eps)
         findings.extend(spec_findings)
 
-        common_eps = await self._probe_common_paths(state)
+        common_eps, sensitive_findings = await self._probe_common_and_sensitive(state)
         endpoints.extend(common_eps)
+        findings.extend(sensitive_findings)
+
+        framework_eps = await self._probe_framework_paths(state)
+        endpoints.extend(framework_eps)
 
         version_eps = await self._version_enumerate(state, endpoints)
         endpoints.extend(version_eps)
 
-        llm_eps, llm_findings, llm_errors = await self._llm_guess_endpoints(state, endpoints)
+        graphql_findings = await self._try_graphql_introspection(state, endpoints)
+        findings.extend(graphql_findings)
+
+        llm_eps, llm_findings, llm_errors = await self._llm_guess_endpoints(
+            state, endpoints
+        )
         endpoints.extend(llm_eps)
         findings.extend(llm_findings)
         errors.extend(llm_errors)
@@ -172,6 +236,37 @@ class APIDiscoveryAgent(BaseAgent):
             findings=findings,
             errors=errors,
         )
+
+    async def _probe_strategy_paths(self, state: ScanState) -> list[Endpoint]:
+        """Probe extra paths suggested by the planner strategy."""
+        endpoints: list[Endpoint] = []
+        if state.scan_strategy is None:
+            return endpoints
+
+        for path in state.scan_strategy.extra_paths_to_try:
+            if not path.startswith("/"):
+                path = "/" + path
+            key = state.endpoint_key("GET", self.http.resolve_url(path))
+            if key in state.endpoints:
+                continue
+            resp = await self.http.get(path)
+            if resp is None or resp.status_code >= 404:
+                continue
+            endpoints.append(
+                Endpoint(
+                    url=self.http.resolve_url(path),
+                    method="GET",
+                    status_code=resp.status_code,
+                    content_type=resp.headers.get("content-type", ""),
+                    discovered_by=DiscoverySource.COMMON_PATH,
+                    response_body_snippet=self.extract_body_snippet(resp),
+                    notes="planner strategy path",
+                )
+            )
+            if resp.status_code == 403:
+                state.blocked_paths.append(path)
+
+        return endpoints
 
     async def _probe_openapi(
         self, state: ScanState
@@ -227,7 +322,6 @@ class APIDiscoveryAgent(BaseAgent):
 
         return endpoints, findings
 
-    # patterns that Swagger UI uses to reference the spec URL (handles both quoted and unquoted keys)
     _SWAGGER_URL_PATTERNS = [
         re.compile(r""""?url"?\s*[:=]\s*['"]([^'"]+\.(?:json|yaml|yml))['"]"""),
         re.compile(r""""?spec[Uu]rl"?\s*[:=]\s*['"]([^'"]+)['"]"""),
@@ -260,15 +354,22 @@ class APIDiscoveryAgent(BaseAgent):
         """Extract endpoints from an OpenAPI 2.x or 3.x spec."""
         endpoints: list[Endpoint] = []
         paths = spec.get("paths", {})
-        base_path = spec.get("basePath", "")
+        base_path = _extract_server_base_path(spec)
 
         for path, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
             full_path = base_path + path if base_path else path
             for method in methods:
                 if method.lower() not in self._HTTP_METHODS:
                     continue
                 endpoints.append(
-                    self._parse_operation(full_path, method, methods[method], spec)
+                    self._parse_operation(
+                        path=full_path,
+                        method=method,
+                        operation=methods[method],
+                        spec=spec,
+                    )
                 )
 
         return endpoints
@@ -280,16 +381,16 @@ class APIDiscoveryAgent(BaseAgent):
             operation = {}
         spec = spec or {}
 
-        # definitions for $ref resolution (Swagger 2.x vs OpenAPI 3.x)
-        definitions = spec.get("definitions") or spec.get("components", {}).get("schemas", {})
+        definitions = (
+            spec.get("definitions")
+            or spec.get("components", {}).get("schemas", {})
+        )
 
-        # basic param names (backward compat)
         params = [
             p["name"] for p in operation.get("parameters", [])
             if isinstance(p, dict) and p.get("name")
         ]
 
-        # rich parameter details
         param_details: list[ParameterDetail] = []
         for p in operation.get("parameters", []):
             if not isinstance(p, dict) or not p.get("name"):
@@ -303,10 +404,8 @@ class APIDiscoveryAgent(BaseAgent):
                 required=p.get("required", False),
             ))
 
-        # request body (OpenAPI 3.x)
         body_content_type, body_fields = self._parse_request_body(operation, definitions)
 
-        # Swagger 2.x body params
         if not body_fields:
             for p in operation.get("parameters", []):
                 if isinstance(p, dict) and p.get("in") == "body":
@@ -314,10 +413,7 @@ class APIDiscoveryAgent(BaseAgent):
                     body_fields = _extract_field_names(schema, definitions)
                     break
 
-        # response fields
         resp_fields = self._parse_response_fields(operation, definitions)
-
-        # security schemes
         security_schemes = self._parse_security(operation, spec)
 
         return Endpoint(
@@ -356,14 +452,12 @@ class APIDiscoveryAgent(BaseAgent):
             resp = responses.get(code, {})
             if not resp:
                 continue
-            # OpenAPI 3.x
             content = resp.get("content", {})
             for media in content.values():
                 schema = media.get("schema", {})
                 fields = _extract_field_names(schema, definitions)
                 if fields:
                     return fields
-            # Swagger 2.x
             schema = resp.get("schema", {})
             if schema:
                 fields = _extract_field_names(schema, definitions)
@@ -375,12 +469,10 @@ class APIDiscoveryAgent(BaseAgent):
     def _parse_security(operation: dict, spec: dict) -> list[SecuritySchemeInfo]:
         """Extract security scheme info from operation or spec level."""
         schemes: list[SecuritySchemeInfo] = []
-        # security requirement at operation or spec level
         security = operation.get("security") or spec.get("security", [])
         if not security:
             return schemes
 
-        # scheme definitions (OpenAPI 3.x vs Swagger 2.x)
         scheme_defs = (
             spec.get("components", {}).get("securitySchemes", {})
             or spec.get("securityDefinitions", {})
@@ -408,8 +500,12 @@ class APIDiscoveryAgent(BaseAgent):
 
         return schemes
 
-    async def _probe_common_paths(self, state: ScanState) -> list[Endpoint]:
+    async def _probe_common_and_sensitive(
+        self, state: ScanState
+    ) -> tuple[list[Endpoint], list[Finding]]:
+        """Probe common API paths and sensitive file paths."""
         endpoints: list[Endpoint] = []
+        findings: list[Finding] = []
 
         for path in COMMON_API_PATHS:
             key = state.endpoint_key("GET", self.http.resolve_url(path))
@@ -434,6 +530,76 @@ class APIDiscoveryAgent(BaseAgent):
                 if resp.status_code == 403:
                     state.blocked_paths.append(path)
 
+        for path in SENSITIVE_FILE_PATHS:
+            key = state.endpoint_key("GET", self.http.resolve_url(path))
+            if key in state.endpoints:
+                continue
+
+            resp = await self.http.get(path)
+            if resp is None or resp.status_code >= 400:
+                continue
+
+            endpoints.append(
+                Endpoint(
+                    url=self.http.resolve_url(path),
+                    method="GET",
+                    status_code=resp.status_code,
+                    content_type=resp.headers.get("content-type", ""),
+                    discovered_by=DiscoverySource.COMMON_PATH,
+                    response_body_snippet=self.extract_body_snippet(resp),
+                )
+            )
+            findings.append(
+                Finding(
+                    agent_name=self.name,
+                    finding_type="sensitive_file_exposed",
+                    title=f"Sensitive file accessible: {path}",
+                    detail=f"{path} returned HTTP {resp.status_code}",
+                    severity=RiskLevel.HIGH,
+                    evidence=resp.text[:200] if resp.text else "",
+                )
+            )
+
+        return endpoints, findings
+
+    async def _probe_framework_paths(self, state: ScanState) -> list[Endpoint]:
+        """Probe framework-specific paths based on tech fingerprint."""
+        endpoints: list[Endpoint] = []
+        fp = state.tech_fingerprint
+
+        detected = set()
+        for fw in fp.frameworks:
+            detected.add(fw.lower())
+        server = (fp.server or "").lower()
+        for tech in fp.technologies:
+            detected.add(tech.lower())
+
+        paths_to_try: list[str] = []
+        for framework, paths in _FRAMEWORK_PATHS.items():
+            if any(framework in d for d in detected):
+                paths_to_try.extend(paths)
+
+        for path in paths_to_try:
+            key = state.endpoint_key("GET", self.http.resolve_url(path))
+            if key in state.endpoints:
+                continue
+            resp = await self.http.get(path)
+            if resp is None or resp.status_code >= 404:
+                continue
+            endpoints.append(
+                Endpoint(
+                    url=self.http.resolve_url(path),
+                    method="GET",
+                    status_code=resp.status_code,
+                    content_type=resp.headers.get("content-type", ""),
+                    discovered_by=DiscoverySource.COMMON_PATH,
+                    response_body_snippet=self.extract_body_snippet(resp),
+                    notes=f"framework path ({server})",
+                )
+            )
+            if resp.status_code == 403:
+                state.blocked_paths.append(path)
+
         return endpoints
 
     async def _version_enumerate(
@@ -450,7 +616,7 @@ class APIDiscoveryAgent(BaseAgent):
         tried: set[str] = set()
 
         for url in all_urls:
-            path = url.replace(self.http.base_url, "")
+            path = urlparse(url).path
             match = version_pattern.search(path)
             if not match:
                 continue
@@ -461,7 +627,9 @@ class APIDiscoveryAgent(BaseAgent):
                 if alt_version == version:
                     continue
                 alt_path = f"{prefix}{alt_version}{suffix}"
-                if alt_path in tried:
+
+                alt_key = state.endpoint_key("GET", self.http.resolve_url(alt_path))
+                if alt_key in state.endpoints or alt_path in tried:
                     continue
                 tried.add(alt_path)
 
@@ -479,6 +647,51 @@ class APIDiscoveryAgent(BaseAgent):
                     )
 
         return version_eps
+
+    async def _try_graphql_introspection(
+        self, state: ScanState, new_endpoints: list[Endpoint]
+    ) -> list[Finding]:
+        """Attempt GraphQL introspection on discovered GraphQL endpoints."""
+        findings: list[Finding] = []
+
+        graphql_urls = [
+            ep.url for ep in list(state.endpoints.values()) + new_endpoints
+            if "/graphql" in ep.url.lower()
+        ]
+        graphql_urls = list(set(graphql_urls))
+
+        if not graphql_urls:
+            graphql_urls = [self.http.resolve_url("/graphql")]
+
+        for url in graphql_urls[:3]:
+            resp = await self.http.request(
+                "POST", url,
+                headers={"Content-Type": "application/json"},
+                content=_GRAPHQL_INTROSPECTION_QUERY,
+            )
+            if resp is None or resp.status_code != 200:
+                continue
+
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            schema = data.get("data", {}).get("__schema", {})
+            if not schema:
+                continue
+
+            type_names = [t["name"] for t in schema.get("types", []) if not t["name"].startswith("__")]
+            findings.append(Finding(
+                agent_name=self.name,
+                finding_type="graphql_introspection",
+                title=f"GraphQL introspection enabled at {url}",
+                detail=f"Schema exposes {len(type_names)} types: {', '.join(type_names[:10])}",
+                severity=RiskLevel.HIGH,
+                evidence=f"Types: {', '.join(type_names[:5])}",
+            ))
+
+        return findings
 
     async def _llm_guess_endpoints(
         self, state: ScanState, new_endpoints: list[Endpoint]
@@ -559,19 +772,57 @@ class APIDiscoveryAgent(BaseAgent):
             data = await self.llm.chat_json(messages, name="api_discovery_llm_guess")
             guesses = data.get("guesses", [])
 
+            # deduplicate guesses by (method, resolved_path)
+            seen_guesses: set[str] = set()
             validated = 0
+            auth_protected = 0
+
             for guess in guesses[:MAX_LLM_GUESSES_TO_VALIDATE]:
                 path = guess.get("path", "")
                 method = guess.get("method", "GET").upper()
                 if not path:
                     continue
 
-                probe_method = method if method == "GET" else "HEAD"
-                resp = await self.http.request(probe_method, path)
-                if resp and resp.status_code < 404:
+                resolved = self.http.resolve_url(path)
+                guess_key = f"{method} {resolved}"
+                if guess_key in seen_guesses:
+                    continue
+                seen_guesses.add(guess_key)
+
+                # use actual method for POST/PUT/PATCH with minimal body
+                if method in ("POST", "PUT", "PATCH"):
+                    resp = await self.http.request(
+                        method, path,
+                        headers={"Content-Type": "application/json"},
+                        content="{}",
+                    )
+                else:
+                    resp = await self.http.request(
+                        "GET" if method == "GET" else "HEAD", path
+                    )
+
+                if resp is None or resp.status_code == 404:
+                    continue
+
+                if resp.status_code in (401, 403):
+                    auth_protected += 1
                     endpoints.append(
                         Endpoint(
-                            url=self.http.resolve_url(path),
+                            url=resolved,
+                            method=method,
+                            status_code=resp.status_code,
+                            discovered_by=DiscoverySource.LLM_API_GUESS,
+                            requires_auth=True,
+                            notes=f"LLM guess (auth required): {guess.get('reason', '')}",
+                        )
+                    )
+                    validated += 1
+                    continue
+
+                if resp.status_code < 404:
+                    endpoints.append(
+                        Endpoint(
+                            url=resolved,
                             method=method,
                             status_code=resp.status_code,
                             content_type=resp.headers.get("content-type", ""),
@@ -583,12 +834,15 @@ class APIDiscoveryAgent(BaseAgent):
                     validated += 1
 
             if validated:
+                detail = f"Out of {len(guesses)} guesses, {validated} returned non-404 responses."
+                if auth_protected:
+                    detail += f" {auth_protected} require authentication."
                 findings.append(
                     Finding(
                         agent_name=self.name,
                         finding_type="llm_api_guesses_validated",
                         title=f"LLM guessed {validated} valid endpoints",
-                        detail=f"Out of {len(guesses)} guesses, {validated} returned non-404 responses.",
+                        detail=detail,
                         severity=RiskLevel.INFO,
                     )
                 )
@@ -605,10 +859,10 @@ class APIDiscoveryAgent(BaseAgent):
         findings: list[Finding] = []
         permissive_cors: list[str] = []
 
-        # deduplicate URLs across state + newly discovered
+        # wider scope: include /admin, /internal, and other API-like paths
         urls_to_check = list({
             ep.url for ep in list(state.endpoints.values()) + new_endpoints
-            if "/api/" in ep.url or "/graphql" in ep.url
+            if any(seg in ep.url for seg in ("/api/", "/graphql", "/admin", "/internal"))
         })[:MAX_CORS_CHECKS]
 
         last_origin = ""
@@ -640,7 +894,7 @@ class APIDiscoveryAgent(BaseAgent):
                     title=f"Permissive CORS on {len(permissive_cors)} endpoint(s)",
                     detail=(
                         "Access-Control-Allow-Origin: * allows any origin to make cross-site "
-                        "requests. Endpoints: " + ", ".join(permissive_cors[:5])
+                        "requests. Endpoints: " + ", ".join(permissive_cors)
                     ),
                     severity=RiskLevel.HIGH,
                     evidence=f"Access-Control-Allow-Origin: {last_origin}",

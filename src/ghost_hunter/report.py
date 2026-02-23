@@ -7,19 +7,20 @@ import logging
 from pathlib import Path
 
 from src.ghost_hunter.clients.llm import LLMClient
-from src.ghost_hunter.models import Finding, RiskLevel, ScanState
+from src.ghost_hunter.models import (
+    Endpoint,
+    Finding,
+    RiskLevel,
+    ScanState,
+    VulnIndicator,
+)
 
 logger = logging.getLogger(__name__)
 
-_MAX_FINDINGS_IN_CONTEXT = 50
-_MAX_ATTACK_SURFACE_ENTRIES = 20
-_MAX_VULN_INDICATORS_PER_ENTRY = 5
-_MAX_SUGGESTED_TESTS_PER_ENTRY = 2
-_MAX_FALLBACK_FINDINGS = 20
-
-_TOKENS_PER_FINDING = 120
-_BASE_REPORT_TOKENS = 3000
-_MAX_REPORT_TOKENS = 8192
+# 32k cap matches most LLM provider output limits
+_TOKENS_PER_FINDING = 400
+_BASE_REPORT_TOKENS = 8000
+_MAX_REPORT_TOKENS = 32768
 
 CWE_REFERENCES: dict[str, str] = {
     "bola_idor": "CWE-639 (Authorization Bypass Through User-Controlled Key)",
@@ -97,13 +98,36 @@ Output raw markdown. Use ## for sections, ### for subsections. Use tables, bulle
 and code blocks where appropriate. Include severity badges like **[CRITICAL]**, **[HIGH]**, \
 **[MEDIUM]**, **[LOW]**, **[INFO]**.
 
+FINDING QUALITY:
+For each finding, you MUST:
+- Describe the specific attack scenario: what would an attacker DO, step by step?
+- Reference the actual parameter names, response fields, and endpoint paths from the evidence
+- Explain WHY the detected pattern is dangerous for THIS specific endpoint \
+(e.g., "The message parameter is passed directly to an LLM without sanitization, \
+allowing an attacker to inject instructions that override system prompts")
+- Write remediation specific to the technology and endpoint, not generic advice \
+(e.g., "Add an LLM input guardrail that rejects prompts containing system-override \
+patterns" instead of "Implement input validation")
+
+DO NOT write generic impact descriptions like "An attacker could extract sensitive \
+information." Every finding must reference concrete data from the evidence provided.
+
 TONE:
 Precise and actionable. Reference specific URLs, parameters, and response data. \
 Be clear about confidence levels — don't present pattern matches as confirmed exploits.
 """
 
 
-def _format_finding(f: Finding) -> str:
+def _format_auth_status(ep: Endpoint) -> str | None:
+    """Return 'requires_auth', 'no_auth', or None."""
+    if ep.requires_auth is True:
+        return "requires_auth"
+    if ep.requires_auth is False:
+        return "no_auth"
+    return None
+
+
+def _format_finding(f: Finding, state: ScanState | None = None) -> str:
     """Format a single finding as a context line for the LLM."""
     validated_tag = ""
     if f.validated is True:
@@ -117,7 +141,46 @@ def _format_finding(f: Finding) -> str:
     )
     if f.evidence:
         line += f"\n  Evidence: {f.evidence}"
+
+    if state is not None:
+        line += _endpoint_context_for_finding(f, state)
+
     return line
+
+
+def _endpoint_context_for_finding(f: Finding, state: ScanState) -> str:
+    """Look up endpoint metadata from a finding title and format as context lines."""
+    ep = _lookup_endpoint_from_finding(f, state)
+    if ep is None:
+        return ""
+
+    parts: list[str] = []
+    if ep.parameters:
+        parts.append(f"\n  Params: {', '.join(ep.parameters)}")
+    auth = _format_auth_status(ep)
+    if auth:
+        parts.append(f"\n  Auth: {auth}")
+    if ep.response_fields:
+        parts.append(f"\n  Response fields: {', '.join(ep.response_fields)}")
+    if ep.response_body_snippet:
+        parts.append(f"\n  Response snippet: {ep.response_body_snippet}")
+    return "".join(parts)
+
+
+def _lookup_endpoint_from_finding(f: Finding, state: ScanState) -> Endpoint | None:
+    """Extract endpoint key from finding title and look up in state.
+
+    Finding titles follow the format "PATTERN — METHOD URL"
+    (optionally prefixed with "[LLM] ").
+    """
+    if " — " not in f.title:
+        return None
+    after_dash = f.title.split(" — ", 1)[1]
+    parts = after_dash.split(" ", 1)
+    if len(parts) != 2:
+        return None
+    method, url = parts
+    return state.find_endpoint(method, url)
 
 
 def _compute_max_tokens(finding_count: int) -> int:
@@ -151,6 +214,18 @@ def _build_tech_fingerprint_section(state: ScanState) -> str:
     return "\n".join(lines)
 
 
+def _format_indicator_lines(indicators: list[VulnIndicator]) -> str:
+    """Format vuln indicators as indented context lines."""
+    lines: list[str] = []
+    for v in indicators:
+        lines.append(
+            f"    - {v.pattern.value} ({v.confidence.value.upper()}): {v.evidence}"
+        )
+        if v.description:
+            lines.append(f"      {v.description}")
+    return "\n".join(lines)
+
+
 def _build_attack_surface_table(state: ScanState) -> str:
     """Format top attack surface entries as a markdown table."""
     if not state.attack_surface:
@@ -159,9 +234,9 @@ def _build_attack_surface_table(state: ScanState) -> str:
         "| # | Risk | Method | URL | Category | Indicators |",
         "|----|------|--------|-----|----------|------------|",
     ]
-    for entry in state.attack_surface[:_MAX_ATTACK_SURFACE_ENTRIES]:
+    for entry in state.attack_surface:
         vulns = ", ".join(
-            v.pattern.value for v in entry.vuln_indicators[:_MAX_VULN_INDICATORS_PER_ENTRY]
+            v.pattern.value for v in entry.vuln_indicators
         )
         rows.append(
             f"| {entry.priority_rank} "
@@ -193,25 +268,35 @@ def _build_report_context(state: ScanState, duration: float) -> str:
     if tech_block:
         sections.append("TECH FINGERPRINT:\n" + tech_block)
 
-    findings_lines = [_format_finding(f) for f in state.findings[:_MAX_FINDINGS_IN_CONTEXT]]
+    findings_lines = [_format_finding(f, state) for f in state.findings]
     if findings_lines:
         sections.append("ALL FINDINGS:\n" + "\n".join(findings_lines))
 
     surface_lines = []
-    for entry in state.attack_surface[:_MAX_ATTACK_SURFACE_ENTRIES]:
-        vulns = ", ".join(
-            v.pattern.value for v in entry.vuln_indicators[:_MAX_VULN_INDICATORS_PER_ENTRY]
-        )
-        tests = " | ".join(entry.suggested_tests[:_MAX_SUGGESTED_TESTS_PER_ENTRY])
-        surface_lines.append(
+    for entry in state.attack_surface:
+        ep = entry.endpoint
+        auth = _format_auth_status(ep) or "auth_unknown"
+        params = ", ".join(ep.parameters) if ep.parameters else "none"
+        resp_fields = ", ".join(ep.response_fields) if ep.response_fields else "none"
+        tests = " | ".join(entry.suggested_tests)
+
+        block = (
             f"#{entry.priority_rank} [{entry.risk_level.value.upper()}] "
-            f"{entry.endpoint.method} {entry.endpoint.url}\n"
-            f"  Category: {entry.category.value} | Vulns: {vulns or 'none'}\n"
-            f"  Rationale: {entry.rationale}\n"
-            f"  Tests: {tests or 'none'}"
+            f"{ep.method} {ep.url}\n"
+            f"  Category: {entry.category.value} | Auth: {auth}\n"
+            f"  Params: {params}\n"
+            f"  Response fields: {resp_fields}"
         )
+
+        if entry.vuln_indicators:
+            block += "\n  Indicators:\n" + _format_indicator_lines(entry.vuln_indicators)
+
+        block += f"\n  Rationale: {entry.rationale}"
+        block += f"\n  Tests: {tests or 'none'}"
+        surface_lines.append(block)
+
     if surface_lines:
-        sections.append("ATTACK SURFACE (top 20):\n" + "\n".join(surface_lines))
+        sections.append("ATTACK SURFACE:\n" + "\n".join(surface_lines))
 
     pattern_counts: dict[str, int] = {}
     suppressed_count = 0
@@ -263,7 +348,7 @@ def _build_fallback_report(state: ScanState, duration: float) -> str:
     ]
     if critical_high:
         parts.append("\n## Critical & High Findings\n")
-        for f in critical_high[:_MAX_FALLBACK_FINDINGS]:
+        for f in critical_high:
             parts.append(f"\n- **[{f.severity.value.upper()}]** {f.title}: {f.detail}")
             if f.evidence:
                 parts.append(f"  Evidence: {f.evidence}")

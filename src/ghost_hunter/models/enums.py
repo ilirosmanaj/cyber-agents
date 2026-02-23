@@ -16,6 +16,7 @@ class DiscoverySource(str, Enum):
     LLM_HYPOTHESIS = "llm_hypothesis"
     LLM_API_GUESS = "llm_api_guess"
     VERSION_ENUM = "version_enum"
+    JS_LLM_ANALYSIS = "js_llm_analysis"
 
 
 class RiskLevel(str, Enum):

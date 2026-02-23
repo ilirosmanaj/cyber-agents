@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # llm defaults
     llm_temperature: float = 0.2
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 16384
 
     # groq (backward compat — used as fallback if llm_api_key is empty)
     groq_api_key: str = ""
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # crawler
     max_crawl_depth: int = 3
     max_pages: int = 100
+    max_js_files: int = 50
 
     @property
     def langfuse_enabled(self) -> bool:

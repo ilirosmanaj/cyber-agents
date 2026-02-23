@@ -8,6 +8,8 @@ from src.ghost_hunter.models.endpoints import (
     SecuritySchemeInfo,
     TechFingerprint,
 )
+from src.ghost_hunter.models.insights import ScanInsight
+from src.ghost_hunter.models.strategy import ScanStrategy
 from src.ghost_hunter.models.enums import (
     DiscoverySource,
     EndpointCategory,
@@ -27,7 +29,9 @@ __all__ = [
     "ParamLocation",
     "ParameterDetail",
     "RiskLevel",
+    "ScanInsight",
     "ScanState",
+    "ScanStrategy",
     "SecuritySchemeInfo",
     "TechFingerprint",
     "VulnIndicator",

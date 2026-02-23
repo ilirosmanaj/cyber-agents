@@ -71,7 +71,7 @@ class TestExtractFieldNames:
         """Self-referencing $ref shouldn't infinite-loop; max_depth cuts it off."""
         definitions = {"A": {"$ref": "#/definitions/A"}}
         schema = {"$ref": "#/definitions/A"}
-        result = _extract_field_names(schema, definitions, max_depth=5)
+        result = _extract_field_names(schema, definitions=definitions, max_depth=5)
         assert result == []
 
 

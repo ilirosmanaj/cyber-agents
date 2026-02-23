@@ -13,7 +13,7 @@ from src.ghost_hunter.models import AgentResult, ScanState
 # cap on blocked paths included in LLM context to avoid token bloat
 _MAX_BLOCKED_PATHS_IN_CONTEXT = 10
 
-MAX_RESPONSE_BODY_SNIPPET = 2000
+MAX_RESPONSE_BODY_SNIPPET = 4000
 _TEXT_CONTENT_TYPES = ("text/", "json", "xml")
 
 
@@ -78,6 +78,11 @@ class BaseAgent(ABC):
                 f"Blocked (403) paths: {', '.join(state.blocked_paths[:_MAX_BLOCKED_PATHS_IN_CONTEXT])}"
             )
         return "\n".join(lines) or "Unknown"
+
+    @staticmethod
+    def build_insights_context(state: ScanState) -> str:
+        """Format accumulated scan insights for LLM prompts."""
+        return state.insights_context()
 
     @staticmethod
     def build_findings_context(state: ScanState, limit: int = 15) -> str:

@@ -643,3 +643,176 @@ class TestBrokenFunctionAuth:
         ]
         results = VulnPatternAnalyzer._check_broken_function_auth(endpoints)
         assert not results
+
+
+# ---------------------------------------------------------------------------
+# BOLA version number false positive fix
+# ---------------------------------------------------------------------------
+
+
+class TestBOLAVersionFix:
+    """Numeric segments in version prefixes like /api/v1/... shouldn't trigger BOLA."""
+
+    def test_v1_not_flagged_as_idor(self):
+        """The '1' in /api/v1/users is a version, not an object ID."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/users")
+        indicators = VulnPatternAnalyzer._check_bola_idor(ep)
+        assert not any(
+            ind.pattern == VulnPattern.BOLA_IDOR and "Numeric path segment" in ind.evidence
+            for ind in indicators
+        )
+
+    def test_v2_not_flagged(self):
+        """Same applies for v2, v3, etc."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v2/accounts")
+        indicators = VulnPatternAnalyzer._check_bola_idor(ep)
+        assert not any(
+            ind.pattern == VulnPattern.BOLA_IDOR and "Numeric path segment" in ind.evidence
+            for ind in indicators
+        )
+
+    def test_real_id_after_version_still_detected(self):
+        """A real numeric ID at the end should still trigger even if v1 is in the path."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/users/42")
+        indicators = VulnPatternAnalyzer._check_bola_idor(ep)
+        assert any(
+            ind.pattern == VulnPattern.BOLA_IDOR and "42" in ind.evidence
+            for ind in indicators
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mass assignment tightening — empty params no longer emit LOW
+# ---------------------------------------------------------------------------
+
+
+class TestMassAssignmentTightening:
+    """LOW mass_assignment should only fire when endpoint has user-controllable fields."""
+
+    def test_no_params_no_low_emission(self):
+        """POST to /profile with NO fields shouldn't emit LOW mass_assignment."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/profile",
+            method="POST",
+            request_body_fields=[],
+            parameters=[],
+        )
+        indicators = VulnPatternAnalyzer._check_mass_assignment(ep)
+        assert not indicators
+
+    def test_with_safe_params_emits_low(self):
+        """POST to /profile with non-dangerous fields should still emit LOW."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/profile",
+            method="POST",
+            request_body_fields=["name", "bio"],
+        )
+        indicators = VulnPatternAnalyzer._check_mass_assignment(ep)
+        assert any(
+            ind.pattern == VulnPattern.MASS_ASSIGNMENT and ind.confidence == RiskLevel.LOW
+            for ind in indicators
+        )
+
+
+# ---------------------------------------------------------------------------
+# Injection surface detection
+# ---------------------------------------------------------------------------
+
+
+class TestInjectionSurfaces:
+    """Tests for _check_injection_surfaces — SQL, path traversal, command injection."""
+
+    def test_sql_injection_params(self):
+        """Params like 'query' and 'filter' should flag SQL injection surface."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/v1/search",
+            parameters=["query", "filter"],
+        )
+        indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
+        assert any("SQL-related params" in ind.evidence for ind in indicators)
+
+    def test_path_traversal_params(self):
+        """Params like 'file' and 'path' flag path traversal surface."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/v1/download",
+            parameters=["file"],
+        )
+        indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
+        assert any("File-path params" in ind.evidence for ind in indicators)
+
+    def test_command_injection_params(self):
+        """Params like 'cmd' and 'host' flag command injection at HIGH confidence."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/v1/tools",
+            parameters=["cmd", "host"],
+        )
+        indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
+        assert any(
+            "Command-related params" in ind.evidence and ind.confidence == RiskLevel.HIGH
+            for ind in indicators
+        )
+
+    def test_safe_params_no_injection(self):
+        """Normal params like 'name' and 'email' shouldn't trigger anything."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/v1/users",
+            parameters=["name", "email"],
+        )
+        indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
+        assert not indicators
+
+
+# ---------------------------------------------------------------------------
+# JWT detection from response headers/notes
+# ---------------------------------------------------------------------------
+
+
+class TestJWTFromHeaders:
+    """JWT weakness detection from www-authenticate header and notes."""
+
+    def test_bearer_in_www_authenticate(self):
+        """www-authenticate: Bearer should trigger jwt_weakness."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/users")
+        ep.response_headers["www-authenticate"] = "Bearer realm=\"api\""
+        indicators = VulnPatternAnalyzer._check_jwt_weakness(ep)
+        assert any(ind.pattern == VulnPattern.JWT_WEAKNESS for ind in indicators)
+
+    def test_jwt_in_notes(self):
+        """Notes mentioning 'JWT' should trigger jwt_weakness."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/users")
+        ep.notes = "Uses JWT authentication for all API calls"
+        indicators = VulnPatternAnalyzer._check_jwt_weakness(ep)
+        assert any(ind.pattern == VulnPattern.JWT_WEAKNESS for ind in indicators)
+
+    def test_no_jwt_signals_clean(self):
+        """Endpoint with no JWT signals shouldn't trigger."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/users")
+        indicators = VulnPatternAnalyzer._check_jwt_weakness(ep)
+        assert not indicators
+
+
+# ---------------------------------------------------------------------------
+# SSRF segment-level matching
+# ---------------------------------------------------------------------------
+
+
+class TestSSRFSegmentMatching:
+    """SSRF path matching works at the segment level, including hyphenated names."""
+
+    def test_hyphenated_segment_matches(self):
+        """/api/v1/url-proxy — 'url-proxy' starts with 'url-', should match."""
+        ep = make_endpoint(url="https://vulnbank.org/api/v1/url-proxy")
+        indicators = VulnPatternAnalyzer._check_ssrf(ep)
+        assert any(ind.pattern == VulnPattern.SSRF for ind in indicators)
+
+    def test_underscore_segment_matches(self):
+        """/api/webhook_handler — 'webhook_handler' starts with 'webhook_'."""
+        ep = make_endpoint(url="https://vulnbank.org/api/webhook_handler")
+        indicators = VulnPatternAnalyzer._check_ssrf(ep)
+        assert any(ind.pattern == VulnPattern.SSRF for ind in indicators)
+
+    def test_substring_doesnt_match(self):
+        """/api/curriculum — contains 'url' as substring but not as segment prefix."""
+        ep = make_endpoint(url="https://vulnbank.org/api/curriculum")
+        indicators = VulnPatternAnalyzer._check_ssrf(ep)
+        assert not indicators

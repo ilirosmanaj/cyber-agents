@@ -23,6 +23,13 @@ from src.ghost_hunter.models import (
 
 logger = logging.getLogger(__name__)
 
+_HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+
+# patterns for detecting API hints inside inline scripts and data-* attributes
+_API_HINT_PATTERN = re.compile(
+    r"""(?:/api/|/graphql|/swagger|/openapi|/rest/)""", re.IGNORECASE
+)
+
 
 def _normalize_url(url: str) -> str:
     """Normalize a URL for deduplication: strip fragment, trailing slash."""
@@ -36,6 +43,14 @@ _INTERESTING_HEADERS = {
     "x-ratelimit-remaining", "x-ratelimit-reset", "www-authenticate",
     "x-frame-options", "x-content-type-options", "server",
 }
+
+_LINK_SKIP_PREFIXES = ("#", "mailto:", "tel:", "javascript:")
+
+
+def _is_html_content_type(content_type_header: str) -> bool:
+    """Check if the Content-Type indicates HTML (ignoring charset)."""
+    mime = content_type_header.split(";")[0].strip().lower()
+    return mime in _HTML_CONTENT_TYPES
 
 
 @register_agent
@@ -63,10 +78,13 @@ class WebCrawlerAgent(BaseAgent):
 
         visited: set[str] = set()
         queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-        queue.put_nowait((state.base_url, 0))
+
+        # seed from base_url and any endpoints already discovered (sitemap, robots)
+        self._seed_queue(state, queue)
 
         pages_crawled = 0
         forms_found = 0
+        seen_forms: set[str] = set()
 
         while not queue.empty() and pages_crawled < settings.max_pages:
             url, depth = queue.get_nowait()
@@ -77,6 +95,10 @@ class WebCrawlerAgent(BaseAgent):
             if depth > settings.max_crawl_depth:
                 continue
             if not self.http.is_same_origin(url):
+                continue
+
+            path = urlparse(normalized).path
+            if path in state.blocked_paths:
                 continue
 
             visited.add(normalized)
@@ -100,7 +122,6 @@ class WebCrawlerAgent(BaseAgent):
             endpoints.append(page_ep)
 
             if resp.status_code == 403:
-                path = urlparse(normalized).path
                 if path not in state.blocked_paths:
                     state.blocked_paths.append(path)
                 continue
@@ -108,7 +129,7 @@ class WebCrawlerAgent(BaseAgent):
             if resp.status_code != 200:
                 continue
 
-            if "text/html" not in content_type_header:
+            if not _is_html_content_type(content_type_header):
                 continue
 
             try:
@@ -117,16 +138,20 @@ class WebCrawlerAgent(BaseAgent):
                 errors.append(f"Parse error on {url}: {e}")
                 continue
 
-            self._extract_links(soup, normalized, depth, queue)
-            form_eps = self._extract_forms(soup, normalized)
+            base_href = self._extract_base_href(soup, normalized)
+
+            self._extract_links(soup, base_href, depth, queue)
+            form_eps = self._extract_forms(soup, base_href, seen_forms)
             endpoints.extend(form_eps)
             forms_found += len(form_eps)
-            script_eps = self._extract_scripts(soup, normalized, state)
+            script_eps = self._extract_scripts(soup, base_href, state)
             endpoints.extend(script_eps)
 
-            findings.extend(self._extract_html_intelligence(soup, normalized))
+            self._extract_additional_urls(soup, base_href, depth, queue, state)
 
-            # capture interesting response headers on the page endpoint
+            findings.extend(self._extract_html_intelligence(soup, normalized))
+            findings.extend(self._extract_api_hints(soup, normalized))
+
             for name, value in resp.headers.items():
                 if name.lower() in _INTERESTING_HEADERS:
                     page_ep.response_headers[name.lower()] = value
@@ -162,52 +187,93 @@ class WebCrawlerAgent(BaseAgent):
             metadata={"pages_crawled": pages_crawled, "forms_found": forms_found},
         )
 
+    @staticmethod
+    def _seed_queue(
+        state: ScanState, queue: asyncio.Queue[tuple[str, int]]
+    ) -> None:
+        """Seed the BFS queue from base_url and any already-discovered endpoints."""
+        queue.put_nowait((state.base_url, 0))
+        for ep in state.endpoints.values():
+            if ep.discovered_by in (DiscoverySource.SITEMAP, DiscoverySource.ROBOTS_TXT):
+                queue.put_nowait((ep.url, 1))
+
+    @staticmethod
+    def _extract_base_href(soup: BeautifulSoup, page_url: str) -> str:
+        """Extract <base href> from the document, falling back to page_url."""
+        base_tag = soup.find("base", href=True)
+        if base_tag:
+            return base_tag["href"]
+        return page_url
+
     def _extract_links(
         self,
         soup: BeautifulSoup,
-        page_url: str,
+        base_href: str,
         depth: int,
         queue: asyncio.Queue[tuple[str, int]],
     ) -> None:
-        _SKIP_PREFIXES = ("#", "mailto:", "tel:", "javascript:")
         for tag in soup.find_all("a", href=True):
             href = tag["href"]
-            if href.startswith(_SKIP_PREFIXES):
+            if href.startswith(_LINK_SKIP_PREFIXES):
                 continue
-            abs_url = urljoin(page_url, href)
+            abs_url = urljoin(base_href, href)
             if self.http.is_same_origin(abs_url):
                 queue.put_nowait((abs_url, depth + 1))
 
-    def _extract_forms(self, soup: BeautifulSoup, page_url: str) -> list[Endpoint]:
+    def _extract_forms(
+        self,
+        soup: BeautifulSoup,
+        base_href: str,
+        seen_forms: set[str],
+    ) -> list[Endpoint]:
         endpoints: list[Endpoint] = []
         for form in soup.find_all("form"):
             action = form.get("action", "")
             method = form.get("method", "GET").upper()
-            abs_action = urljoin(page_url, action) if action else page_url
+            abs_action = urljoin(base_href, action) if action else base_href
             if not self.http.is_same_origin(abs_action):
                 continue
-            params = [
-                inp.get("name")
-                for inp in form.find_all(["input", "select", "textarea"])
-                if inp.get("name")
-            ]
+
+            normalized_action = _normalize_url(abs_action)
+            form_key = f"{method} {normalized_action}"
+            if form_key in seen_forms:
+                continue
+            seen_forms.add(form_key)
+
+            enctype = form.get("enctype", "")
+            params: list[str] = []
+            has_file_input = False
+
+            for inp in form.find_all(["input", "select", "textarea"]):
+                name = inp.get("name")
+                if not name:
+                    continue
+                params.append(name)
+                if inp.get("type", "").lower() == "file":
+                    has_file_input = True
+
+            content_type = enctype if enctype else None
+            if has_file_input and not enctype:
+                content_type = "multipart/form-data"
+
             endpoints.append(
                 Endpoint(
-                    url=_normalize_url(abs_action),
+                    url=normalized_action,
                     method=method,
                     discovered_by=DiscoverySource.CRAWL,
                     parameters=params,
-                    notes=f"form on {page_url}",
+                    request_body_content_type=content_type,
+                    notes=f"form on {base_href}",
                 )
             )
         return endpoints
 
     def _extract_scripts(
-        self, soup: BeautifulSoup, page_url: str, state: ScanState
+        self, soup: BeautifulSoup, base_href: str, state: ScanState
     ) -> list[Endpoint]:
         endpoints: list[Endpoint] = []
         for script in soup.find_all("script", src=True):
-            abs_src = urljoin(page_url, script["src"])
+            abs_src = urljoin(base_href, script["src"])
             if not self.http.is_same_origin(abs_src):
                 continue
             state.js_urls.append(abs_src)
@@ -220,6 +286,80 @@ class WebCrawlerAgent(BaseAgent):
                 )
             )
         return endpoints
+
+    def _extract_additional_urls(
+        self,
+        soup: BeautifulSoup,
+        base_href: str,
+        depth: int,
+        queue: asyncio.Queue[tuple[str, int]],
+        state: ScanState,
+    ) -> None:
+        """Extract URLs from iframes, stylesheets, srcset, and data-* attributes."""
+        for iframe in soup.find_all("iframe", src=True):
+            abs_url = urljoin(base_href, iframe["src"])
+            if self.http.is_same_origin(abs_url):
+                queue.put_nowait((abs_url, depth + 1))
+
+        for link in soup.find_all("link", rel=True, href=True):
+            abs_url = urljoin(base_href, link["href"])
+            if not self.http.is_same_origin(abs_url):
+                continue
+            rels = link.get("rel", [])
+            if "stylesheet" in rels or "preload" in rels:
+                state.js_urls.append(abs_url)
+
+        for tag in soup.find_all(attrs={"srcset": True}):
+            for entry in tag["srcset"].split(","):
+                src = entry.strip().split()[0] if entry.strip() else ""
+                if not src:
+                    continue
+                abs_url = urljoin(base_href, src)
+                if self.http.is_same_origin(abs_url):
+                    queue.put_nowait((abs_url, depth + 1))
+
+        for tag in soup.find_all(attrs=True):
+            for attr_name, attr_val in tag.attrs.items():
+                if not attr_name.startswith("data-"):
+                    continue
+                if not isinstance(attr_val, str):
+                    continue
+                if attr_val.startswith("/") or attr_val.startswith("http"):
+                    abs_url = urljoin(base_href, attr_val)
+                    if self.http.is_same_origin(abs_url):
+                        queue.put_nowait((abs_url, depth + 1))
+
+    def _extract_api_hints(
+        self, soup: BeautifulSoup, page_url: str
+    ) -> list[Finding]:
+        """Detect API paths in inline scripts and data-* attributes."""
+        findings: list[Finding] = []
+        hints: set[str] = set()
+        path = urlparse(page_url).path
+
+        for script in soup.find_all("script", src=False):
+            text = script.string or ""
+            for match in _API_HINT_PATTERN.finditer(text):
+                hints.add(match.group(0))
+
+        for tag in soup.find_all(attrs=True):
+            for attr_name, attr_val in tag.attrs.items():
+                if not attr_name.startswith("data-"):
+                    continue
+                if isinstance(attr_val, str) and _API_HINT_PATTERN.search(attr_val):
+                    hints.add(attr_val[:80])
+
+        if hints:
+            findings.append(Finding(
+                agent_name=self.name,
+                finding_type="api_hints_in_html",
+                title=f"API hints in HTML on {path}",
+                detail=f"Found {len(hints)} API-related references in inline scripts or data attributes",
+                severity=RiskLevel.INFO,
+                evidence=", ".join(sorted(hints)[:5]),
+            ))
+
+        return findings
 
     def _extract_html_intelligence(
         self, soup: BeautifulSoup, page_url: str

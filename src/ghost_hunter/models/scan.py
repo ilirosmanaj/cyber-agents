@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from src.ghost_hunter.models.attack_surface import AttackSurfaceEntry, VulnIndicator
 from src.ghost_hunter.models.endpoints import Endpoint, Finding, TechFingerprint
+from src.ghost_hunter.models.insights import ScanInsight
+from src.ghost_hunter.models.strategy import ScanStrategy
 
 
 class AgentResult(BaseModel):
@@ -33,6 +35,8 @@ class ScanState(BaseModel):
     js_urls: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     agents_completed: list[str] = Field(default_factory=list)
+    scan_insights: list[ScanInsight] = Field(default_factory=list)
+    scan_strategy: ScanStrategy | None = None
 
     def endpoint_key(self, method: str, url: str) -> str:
         return f"{method.upper()} {url.rstrip('/')}"
@@ -100,6 +104,20 @@ class ScanState(BaseModel):
         self.errors.extend(result.errors)
         if result.agent_name not in self.agents_completed:
             self.agents_completed.append(result.agent_name)
+
+    def insights_context(self, max_insights: int = 5) -> str:
+        """Format recent insights for LLM prompts."""
+        if not self.scan_insights:
+            return "No prior insights."
+        recent = self.scan_insights[-max_insights:]
+        lines: list[str] = []
+        for insight in recent:
+            lines.append(f"[{insight.phase}] {insight.summary}")
+            if insight.key_signals:
+                lines.append(f"  Signals: {', '.join(insight.key_signals)}")
+            if insight.recommended_focus:
+                lines.append(f"  Focus: {', '.join(insight.recommended_focus)}")
+        return "\n".join(lines)
 
     def summary(self) -> str:
         """Short summary for LLM context."""

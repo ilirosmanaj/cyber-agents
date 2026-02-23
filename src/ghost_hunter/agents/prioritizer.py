@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from src.ghost_hunter.agents.registry import register_agent
 from src.ghost_hunter.agents.base import BaseAgent
@@ -10,12 +11,99 @@ from src.ghost_hunter.models import (
     AgentResult,
     AttackSurfaceEntry,
     EndpointCategory,
+    Endpoint,
     Finding,
     RiskLevel,
     ScanState,
+    VulnIndicator,
 )
 
 logger = logging.getLogger(__name__)
+
+PRIORITIZER_BATCH_SIZE = 25
+
+# severity ordering for deterministic fallback — lower index = higher severity
+_SEVERITY_ORDER = {level: idx for idx, level in enumerate(RiskLevel)}
+
+# categories that get INFO risk when no vuln indicators exist
+_LOW_RISK_CATEGORIES = {
+    EndpointCategory.STATIC_ASSET,
+    EndpointCategory.HEALTH_CHECK,
+    EndpointCategory.DOCUMENTATION,
+}
+
+# max response body snippet chars included in prioritizer context
+_MAX_SNIPPET_IN_CONTEXT = 300
+
+
+def _highest_severity(indicators: list[VulnIndicator]) -> RiskLevel:
+    """Return the highest severity from a list of indicators, defaulting to INFO."""
+    active = [ind for ind in indicators if not ind.suppressed]
+    if not active:
+        return RiskLevel.INFO
+    return min(active, key=lambda i: _SEVERITY_ORDER[i.confidence]).confidence
+
+
+def _deterministic_risk(ep: Endpoint, indicators: list[VulnIndicator]) -> RiskLevel:
+    """Assign risk level based on vuln indicators and endpoint characteristics."""
+    if indicators:
+        return _highest_severity(indicators)
+
+    cat = ep.category or EndpointCategory.UNKNOWN
+    if cat in _LOW_RISK_CATEGORIES:
+        return RiskLevel.INFO
+
+    if ep.requires_auth is False:
+        return RiskLevel.MEDIUM
+
+    return RiskLevel.LOW
+
+
+def _format_ep_line(
+    index: int, ep: Endpoint, indicators: list[VulnIndicator]
+) -> str:
+    """Format a single endpoint for the LLM batch context."""
+    cat = ep.category.value if ep.category else "unknown"
+    auth = (
+        "requires_auth"
+        if ep.requires_auth
+        else "no_auth" if ep.requires_auth is False
+        else "auth_unknown"
+    )
+    path = urlparse(ep.url).path
+
+    parts = [
+        f"  {index}. {ep.method} {ep.url} [{ep.status_code}] "
+        f"category={cat} {auth}"
+    ]
+
+    if ep.parameters:
+        parts.append(f"params=[{', '.join(ep.parameters)}]")
+    if ep.response_fields:
+        parts.append(f"response_fields=[{', '.join(ep.response_fields[:10])}]")
+    if ep.discovered_by:
+        parts.append(f"src={ep.discovered_by.value}")
+
+    line = " | ".join(parts)
+
+    active_indicators = [ind for ind in indicators if not ind.suppressed]
+    if active_indicators:
+        vuln_tags = ", ".join(
+            f"{ind.pattern.value}({ind.confidence.value})"
+            for ind in active_indicators
+        )
+        line += f" VULN=[{vuln_tags}]"
+
+        # include chain info if present
+        chain_ids = {ind.chain_id for ind in active_indicators if ind.chain_id}
+        if chain_ids:
+            line += f" CHAINS={len(chain_ids)}"
+
+    if ep.response_body_snippet:
+        snippet = ep.response_body_snippet[:_MAX_SNIPPET_IN_CONTEXT]
+        line += f"\n      body_preview: {snippet}"
+
+    return line
 
 
 @register_agent
@@ -30,37 +118,98 @@ class PrioritizerAgent(BaseAgent):
         findings: list[Finding] = []
         errors: list[str] = []
 
-        all_endpoints = list(state.endpoints.values())
+        all_endpoints = list(state.endpoints.items())
         if not all_endpoints:
             return AgentResult(agent_name=self.name, success=True)
 
-        ep_lines = []
-        for ep in all_endpoints:
-            cat = ep.category.value if ep.category else "unknown"
-            auth = (
-                "requires_auth"
-                if ep.requires_auth
-                else "no_auth" if ep.requires_auth is False
-                else "auth_unknown"
-            )
-            params = f" params=[{', '.join(ep.parameters)}]" if ep.parameters else ""
-            line = (
-                f"  {ep.method} {ep.url} [{ep.status_code}] "
-                f"category={cat} {auth}{params}"
-            )
-            # append vuln indicators if present
-            key = state.endpoint_key(ep.method, ep.url)
-            indicators = state.vuln_indicators.get(key, [])
-            if indicators:
-                vuln_tags = ", ".join(
-                    f"{ind.pattern.value}({ind.confidence.value})"
-                    for ind in indicators
-                )
-                line += f" VULN=[{vuln_tags}]"
-            ep_lines.append(line)
-
         tech_context = self.build_tech_context(state)
         findings_context = self.build_findings_context(state, limit=20)
+        insights_context = self.build_insights_context(state)
+
+        prioritized_keys: set[str] = set()
+
+        for i in range(0, len(all_endpoints), PRIORITIZER_BATCH_SIZE):
+            batch = all_endpoints[i : i + PRIORITIZER_BATCH_SIZE]
+            batch_entries = self._prioritize_batch(
+                state=state,
+                batch=batch,
+                tech_context=tech_context,
+                findings_context=findings_context,
+                insights_context=insights_context,
+            )
+
+            if batch_entries is not None:
+                for entry in batch_entries:
+                    key = state.endpoint_key(entry.endpoint.method, entry.endpoint.url)
+                    if key not in prioritized_keys:
+                        state.attack_surface.append(entry)
+                        prioritized_keys.add(key)
+            else:
+                errors.append(f"Prioritization batch {i // PRIORITIZER_BATCH_SIZE} failed")
+                # deterministic fallback for this batch
+                for key, ep in batch:
+                    if key in prioritized_keys:
+                        continue
+                    entry = self._fallback_entry(state=state, key=key, ep=ep)
+                    state.attack_surface.append(entry)
+                    prioritized_keys.add(key)
+
+        # catch any endpoints the LLM missed across all batches
+        for key, ep in all_endpoints:
+            if key in prioritized_keys:
+                continue
+            entry = self._fallback_entry(state=state, key=key, ep=ep)
+            state.attack_surface.append(entry)
+
+        # re-assign sequential ranks by risk severity
+        state.attack_surface.sort(
+            key=lambda e: _SEVERITY_ORDER.get(e.risk_level, 99)
+        )
+        for rank, entry in enumerate(state.attack_surface, start=1):
+            entry.priority_rank = rank
+
+        risk_counts: dict[str, int] = {}
+        for entry in state.attack_surface:
+            risk_counts[entry.risk_level.value] = (
+                risk_counts.get(entry.risk_level.value, 0) + 1
+            )
+
+        findings.append(
+            Finding(
+                agent_name=self.name,
+                finding_type="attack_surface_mapped",
+                title=f"Attack surface: {len(state.attack_surface)} endpoints prioritized",
+                detail=(
+                    "Risk distribution: "
+                    + ", ".join(f"{v} {k}" for k, v in risk_counts.items())
+                ),
+                severity=RiskLevel.INFO,
+            )
+        )
+
+        return AgentResult(
+            agent_name=self.name,
+            success=len(errors) == 0,
+            endpoints_found=[],
+            findings=findings,
+            errors=errors,
+        )
+
+    async def _prioritize_batch(
+        self,
+        state: ScanState,
+        batch: list[tuple[str, Endpoint]],
+        tech_context: str,
+        findings_context: str,
+        insights_context: str = "",
+    ) -> list[AttackSurfaceEntry] | None:
+        """Run LLM prioritization on a batch. Returns None on failure."""
+        ep_lines = []
+        for idx, (key, ep) in enumerate(batch, start=1):
+            indicators = state.vuln_indicators.get(key, [])
+            ep_lines.append(_format_ep_line(
+                index=idx, ep=ep, indicators=indicators,
+            ))
 
         messages = [
             {
@@ -114,30 +263,29 @@ class PrioritizerAgent(BaseAgent):
                     '  "reasoning": "3-5 sentence overall attack surface analysis",\n'
                     '  "attack_surface": [\n'
                     "    {\n"
-                    '      "url": "...",\n'
-                    '      "method": "...",\n'
+                    '      "index": 1,\n'
                     '      "category": "rest_api|auth_endpoint|admin_endpoint|...",\n'
                     '      "risk_level": "critical|high|medium|low|info",\n'
-                    '      "priority_rank": 1,\n'
                     '      "rationale": "Why this is high priority...",\n'
                     '      "suggested_tests": [\n'
-                    '        "curl -X POST https://target/transfer/12345 -H \'Content-Type: application/json\' '
-                    "-d '{\\\"amount\\\": 1000, \\\"to_account\\\": \\\"attacker\\\"}' — test unauthenticated fund transfer\",\n"
-                    '        "curl -X PUT https://target/profile -H \'Authorization: Bearer TOKEN\' '
-                    "-d '{\\\"is_admin\\\": true}' — test mass assignment privilege escalation\"\n"
+                    '        "curl -X POST https://target/transfer/12345 '
+                    "-H 'Content-Type: application/json' "
+                    "-d '{\\\"amount\\\": 1000}' — test unauthenticated fund transfer\"\n"
                     "      ]\n"
                     "    }\n"
                     "  ]\n"
                     "}\n\n"
-                    "Include ALL endpoints, ranked from highest to lowest priority."
+                    "IMPORTANT: Use the index number to identify each endpoint. "
+                    "Include ALL endpoints from the batch."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"Target: {state.target}\n\n"
+                    f"Prior Insights:\n{insights_context}\n\n"
                     f"Tech stack:\n{tech_context}\n\n"
-                    f"Endpoints ({len(all_endpoints)}):\n"
+                    f"Endpoints to prioritize ({len(batch)}):\n"
                     + "\n".join(ep_lines)
                     + f"\n\nFindings:\n{findings_context}"
                 ),
@@ -145,70 +293,87 @@ class PrioritizerAgent(BaseAgent):
         ]
 
         try:
-            data = await self.llm.chat_json(messages, name="prioritize_attack_surface")
-            surface = data.get("attack_surface", [])
+            data = await self.llm.chat_json(
+                messages, name=f"prioritize_batch_{hash(batch[0][0]) % 1000}"
+            )
+            return self._parse_llm_response(state=state, data=data, batch=batch)
+        except Exception as e:
+            logger.warning("Prioritization LLM call failed: %s", e)
+            return None
 
-            for i, entry in enumerate(surface):
-                url = entry.get("url", "")
-                method = entry.get("method", "GET")
+    @staticmethod
+    def _parse_llm_response(
+        state: ScanState,
+        data: dict,
+        batch: list[tuple[str, Endpoint]],
+    ) -> list[AttackSurfaceEntry]:
+        """Parse LLM response into AttackSurfaceEntry objects using index-based matching."""
+        entries: list[AttackSurfaceEntry] = []
 
+        for entry_data in data.get("attack_surface", []):
+            batch_idx = entry_data.get("index")
+            if batch_idx is None:
+                # fallback to URL-based matching
+                url = entry_data.get("url", "")
+                method = entry_data.get("method", "GET")
                 ep = state.find_endpoint(method, url)
                 if ep is None:
                     continue
-
-                try:
-                    risk = RiskLevel(entry.get("risk_level", "info"))
-                except ValueError:
-                    risk = RiskLevel.INFO
-
-                try:
-                    cat = EndpointCategory(entry.get("category", "unknown"))
-                except ValueError:
-                    cat = ep.category or EndpointCategory.UNKNOWN
-
                 ep_key = state.endpoint_key(method, url)
-                ep_vulns = state.vuln_indicators.get(ep_key, [])
+            else:
+                list_idx = batch_idx - 1
+                if list_idx < 0 or list_idx >= len(batch):
+                    continue
+                ep_key, ep = batch[list_idx]
 
-                state.attack_surface.append(
-                    AttackSurfaceEntry(
-                        endpoint=ep,
-                        category=cat,
-                        risk_level=risk,
-                        priority_rank=entry.get("priority_rank", i + 1),
-                        rationale=entry.get("rationale", ""),
-                        suggested_tests=entry.get("suggested_tests", []),
-                        vuln_indicators=ep_vulns,
-                    )
-                )
+            try:
+                risk = RiskLevel(entry_data.get("risk_level", "info"))
+            except ValueError:
+                risk = RiskLevel.INFO
 
-            state.attack_surface.sort(key=lambda x: x.priority_rank)
+            try:
+                cat = EndpointCategory(entry_data.get("category", "unknown"))
+            except ValueError:
+                cat = ep.category or EndpointCategory.UNKNOWN
 
-            risk_counts: dict[str, int] = {}
-            for entry in state.attack_surface:
-                risk_counts[entry.risk_level.value] = (
-                    risk_counts.get(entry.risk_level.value, 0) + 1
-                )
+            ep_vulns = state.vuln_indicators.get(ep_key, [])
+            active_vulns = [ind for ind in ep_vulns if not ind.suppressed]
 
-            findings.append(
-                Finding(
-                    agent_name=self.name,
-                    finding_type="attack_surface_mapped",
-                    title=f"Attack surface: {len(state.attack_surface)} endpoints prioritized",
-                    detail=(
-                        "Risk distribution: "
-                        + ", ".join(f"{v} {k}" for k, v in risk_counts.items())
-                    ),
-                    severity=RiskLevel.INFO,
-                )
+            entries.append(AttackSurfaceEntry(
+                endpoint=ep,
+                category=cat,
+                risk_level=risk,
+                priority_rank=0,
+                rationale=entry_data.get("rationale", ""),
+                suggested_tests=entry_data.get("suggested_tests", []),
+                vuln_indicators=active_vulns,
+            ))
+
+        return entries
+
+    @staticmethod
+    def _fallback_entry(
+        state: ScanState, key: str, ep: Endpoint
+    ) -> AttackSurfaceEntry:
+        """Create a deterministic fallback entry when LLM is unavailable."""
+        indicators = state.vuln_indicators.get(key, [])
+        active = [ind for ind in indicators if not ind.suppressed]
+        risk = _deterministic_risk(ep=ep, indicators=active)
+
+        if active:
+            vuln_summary = ", ".join(
+                f"{ind.pattern.value} ({ind.confidence.value})"
+                for ind in active
             )
+            rationale = f"Rule-based risk assessment: {vuln_summary}"
+        else:
+            rationale = "No vulnerability indicators detected"
 
-        except Exception as e:
-            errors.append(f"Prioritization failed: {e}")
-
-        return AgentResult(
-            agent_name=self.name,
-            success=len(errors) == 0,
-            endpoints_found=[],
-            findings=findings,
-            errors=errors,
+        return AttackSurfaceEntry(
+            endpoint=ep,
+            category=ep.category or EndpointCategory.UNKNOWN,
+            risk_level=risk,
+            priority_rank=0,
+            rationale=rationale,
+            vuln_indicators=active,
         )

@@ -28,10 +28,10 @@ from src.ghost_hunter.models import (
 
 logger = logging.getLogger(__name__)
 
-LLM_VULN_BATCH_SIZE = 12
+LLM_VULN_BATCH_SIZE = 8
 # caps for LLM context windows — keep prompts under token limits
-_MAX_SUMMARY_ENDPOINTS = 60
-_MAX_RESPONSE_FIELDS_PER_ENDPOINT = 10
+_MAX_SUMMARY_ENDPOINTS = 100
+_MAX_RESPONSE_FIELDS_PER_ENDPOINT = 25
 
 # severity ordering for comparison — lower index = higher severity
 _SEVERITY_ORDER = {level: idx for idx, level in enumerate(RiskLevel)}
@@ -231,6 +231,9 @@ _EXCESSIVE_EMAIL_THRESHOLD = 3
 # Numeric path segments longer than this are likely not enumerable IDs
 _MAX_NUMERIC_ID_LENGTH = 10
 
+# version prefix — segments like "v1", "v2" should not trigger BOLA
+_VERSION_SEGMENT = re.compile(r"^v\d+$", re.IGNORECASE)
+
 # API version confusion: extract version from path
 _VERSION_PATTERN = re.compile(r"/(?:api/)?v(\d+)(/.*)")
 
@@ -239,6 +242,29 @@ _ADMIN_DEBUG_PATHS = re.compile(
     r"(?:/admin|/debug|/internal|/management|/actuator|/console|/s3cr3t|/secret)",
     re.IGNORECASE,
 )
+
+# SQL injection surface: params that likely build SQL
+_SQL_INJECTION_PARAMS = {
+    "q", "query", "search", "filter", "order_by", "sort",
+    "sort_by", "order", "group_by", "where", "column",
+    "field", "table", "select", "limit", "offset",
+}
+
+# path traversal surface: params that reference files
+_PATH_TRAVERSAL_PARAMS = {
+    "file", "path", "document", "filename", "filepath",
+    "dir", "directory", "folder", "template", "include",
+    "page", "read", "load", "config", "log",
+}
+
+# command injection surface: params that suggest OS interaction
+_COMMAND_INJECTION_PARAMS = {
+    "cmd", "exec", "command", "execute", "run",
+    "shell", "process", "ping", "host", "ip",
+}
+
+# SSRF — segment-level path matching (avoids false positives from substrings)
+_SSRF_PATH_SEGMENTS = {"url", "callback", "webhook", "proxy", "fetch"}
 
 
 def _apply_suppressions(
@@ -353,6 +379,7 @@ class VulnPatternAnalyzer(BaseAgent):
         "_check_auth_boundary",
         "_check_excessive_data",
         "_check_response_body_leaks",
+        "_check_injection_surfaces",
     ]
 
     async def run(self, state: ScanState) -> AgentResult:
@@ -530,40 +557,52 @@ class VulnPatternAnalyzer(BaseAgent):
         indicators: list[VulnIndicator] = []
         path = urlparse(ep.url).path
 
-        if _IDOR_PATH_PARAM.search(path):
+        match = _IDOR_PATH_PARAM.search(path)
+        if match:
+            param = match.group(0).strip("{}")
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.BOLA_IDOR,
                 confidence=RiskLevel.HIGH,
                 evidence=f"Path contains object ID template: {path}",
                 description=(
-                    "Endpoint accepts an object identifier in the URL path. "
-                    "An attacker could enumerate or substitute IDs to access "
-                    "other users' resources if authorization is insufficient."
+                    f"Path parameter '{param}' in {path} is an enumerable object "
+                    f"identifier. Changing this value may return another user's "
+                    f"data if server-side authorization doesn't verify resource "
+                    f"ownership."
                 ),
             ))
 
-        for part in path.rstrip("/").split("/"):
-            if part.isdigit() and len(part) <= _MAX_NUMERIC_ID_LENGTH:
-                indicators.append(VulnIndicator(
-                    pattern=VulnPattern.BOLA_IDOR,
-                    confidence=RiskLevel.MEDIUM,
-                    evidence=f"Numeric path segment in {path}",
-                    description=(
-                        "Numeric path segment detected — may be an enumerable "
-                        "object identifier susceptible to IDOR."
-                    ),
-                ))
-                break
+        segments = path.rstrip("/").split("/")
+        for i, part in enumerate(segments):
+            if not part.isdigit() or len(part) > _MAX_NUMERIC_ID_LENGTH:
+                continue
+            # skip version-like segments (e.g., "1" after "v" in /api/v1/users)
+            prev = segments[i - 1] if i > 0 else ""
+            if _VERSION_SEGMENT.match(prev + part):
+                continue
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.BOLA_IDOR,
+                confidence=RiskLevel.MEDIUM,
+                evidence=f"Numeric path segment in {path}",
+                description=(
+                    f"Numeric segment '{part}' in {path} may be an enumerable "
+                    f"object identifier. An attacker could iterate over IDs to "
+                    f"access other records."
+                ),
+            ))
+            break
 
         idor_params = _collect_param_names(ep) & _IDOR_QUERY_PARAMS
         if idor_params:
+            param_list = ", ".join(sorted(idor_params))
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.BOLA_IDOR,
                 confidence=RiskLevel.HIGH,
-                evidence=f"ID-like params: {', '.join(sorted(idor_params))}",
+                evidence=f"ID-like params: {param_list}",
                 description=(
-                    "Parameters reference object identifiers that could be "
-                    "manipulated for unauthorized access."
+                    f"Parameters {param_list} on {ep.method} {path} reference "
+                    f"object identifiers that could be manipulated to access "
+                    f"another user's resources."
                 ),
             ))
 
@@ -577,46 +616,63 @@ class VulnPatternAnalyzer(BaseAgent):
         if not _MASS_ASSIGN_PATHS.search(path):
             return []
 
-        dangerous = _collect_param_names(ep) & _MASS_ASSIGN_FIELDS
+        all_params = _collect_param_names(ep)
+        dangerous = all_params & _MASS_ASSIGN_FIELDS
         if dangerous:
+            field_list = ", ".join(sorted(dangerous))
             return [VulnIndicator(
                 pattern=VulnPattern.MASS_ASSIGNMENT,
                 confidence=RiskLevel.HIGH,
-                evidence=f"Dangerous fields accepted: {', '.join(sorted(dangerous))}",
+                evidence=f"Dangerous fields accepted: {field_list}",
                 description=(
-                    "Endpoint accepts privilege-related fields that could allow "
-                    "an attacker to escalate privileges via mass assignment."
+                    f"Privilege-related fields ({field_list}) are accepted "
+                    f"by {ep.method} {path}. An attacker could include them "
+                    f"in the request body to escalate privileges or modify "
+                    f"account attributes they shouldn't control."
                 ),
             )]
 
-        # even without known dangerous fields, POST to register/profile is worth flagging
+        # only emit LOW if the endpoint actually accepts user-controllable fields
+        if not all_params:
+            return []
+
         return [VulnIndicator(
             pattern=VulnPattern.MASS_ASSIGNMENT,
             confidence=RiskLevel.LOW,
             evidence=f"{ep.method} {path}",
             description=(
-                "State-changing request to a user-facing endpoint. Verify that "
-                "the server restricts which fields can be set by the client."
+                f"{ep.method} {path} is a state-changing request to a "
+                f"user-facing endpoint. Verify that the server restricts "
+                f"which fields can be set by the client."
             ),
         )]
 
     @staticmethod
     def _check_ssrf(ep: Endpoint) -> list[VulnIndicator]:
+        path = urlparse(ep.url).path
         ssrf_params = _collect_param_names(ep) & _SSRF_PARAMS
         if ssrf_params:
+            param_list = ", ".join(sorted(ssrf_params))
             return [VulnIndicator(
                 pattern=VulnPattern.SSRF,
                 confidence=RiskLevel.HIGH,
-                evidence=f"URL-accepting params: {', '.join(sorted(ssrf_params))}",
+                evidence=f"URL-accepting params: {param_list}",
                 description=(
-                    "Endpoint accepts URL or URI parameters that could be exploited "
-                    "for Server-Side Request Forgery to reach internal services."
+                    f"URL parameters ({param_list}) on {ep.method} {path} "
+                    f"could be exploited for Server-Side Request Forgery. "
+                    f"Supplying internal URLs (e.g., http://169.254.169.254/) "
+                    f"may reach cloud metadata or internal services."
                 ),
             )]
 
-        # fall back to path-based detection
-        path = urlparse(ep.url).path.lower()
-        if "url" not in path and "callback" not in path and "webhook" not in path:
+        # segment-level matching: check if any path segment starts with an SSRF keyword
+        # handles hyphenated segments like "url-proxy" and "webhook-handler"
+        path_segments = [seg.lower() for seg in path.split("/") if seg]
+        has_ssrf_segment = any(
+            seg in _SSRF_PATH_SEGMENTS or any(seg.startswith(kw + "-") or seg.startswith(kw + "_") for kw in _SSRF_PATH_SEGMENTS)
+            for seg in path_segments
+        )
+        if not has_ssrf_segment:
             return []
 
         return [VulnIndicator(
@@ -624,14 +680,16 @@ class VulnPatternAnalyzer(BaseAgent):
             confidence=RiskLevel.MEDIUM,
             evidence=f"URL-related path: {path}",
             description=(
-                "Endpoint path suggests it accepts URLs. Verify whether user input "
-                "could trigger server-side requests to internal services."
+                f"{ep.method} {path} path suggests it processes URLs. "
+                f"Verify whether user input could trigger server-side "
+                f"requests to internal services."
             ),
         )]
 
     @staticmethod
     def _check_file_upload(ep: Endpoint) -> list[VulnIndicator]:
         indicators: list[VulnIndicator] = []
+        path = urlparse(ep.url).path
 
         if ep.request_body_content_type and "multipart" in ep.request_body_content_type:
             indicators.append(VulnIndicator(
@@ -639,31 +697,34 @@ class VulnPatternAnalyzer(BaseAgent):
                 confidence=RiskLevel.HIGH,
                 evidence=f"Content-Type: {ep.request_body_content_type}",
                 description=(
-                    "Endpoint accepts multipart file uploads. Verify file type "
-                    "validation, size limits, and storage isolation."
+                    f"Multipart uploads ({ep.request_body_content_type}) "
+                    f"on {ep.method} {path}. Verify file type validation, "
+                    f"size limits, and storage isolation."
                 ),
             ))
 
         upload_params = _collect_param_names(ep) & _UPLOAD_PARAMS
-        path = urlparse(ep.url).path.lower()
+        path_lower = path.lower()
         if upload_params:
+            param_list = ", ".join(sorted(upload_params))
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.FILE_UPLOAD,
                 confidence=RiskLevel.HIGH,
-                evidence=f"Upload params: {', '.join(sorted(upload_params))}",
+                evidence=f"Upload params: {param_list}",
                 description=(
-                    "Endpoint appears to handle file uploads. Check for "
-                    "unrestricted file types and path traversal."
+                    f"{ep.method} {path} handles file uploads via parameters "
+                    f"({param_list}). Check for unrestricted file types and "
+                    f"path traversal in filenames."
                 ),
             ))
-        elif "upload" in path or "attach" in path:
+        elif "upload" in path_lower or "attach" in path_lower:
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.FILE_UPLOAD,
                 confidence=RiskLevel.MEDIUM,
                 evidence=f"Upload path: {path}",
                 description=(
-                    "Endpoint path suggests file upload functionality. Check for "
-                    "unrestricted file types and path traversal."
+                    f"{ep.method} {path} path suggests file upload functionality. "
+                    f"Check for unrestricted file types and path traversal."
                 ),
             ))
 
@@ -672,43 +733,61 @@ class VulnPatternAnalyzer(BaseAgent):
     @staticmethod
     def _check_jwt_weakness(ep: Endpoint) -> list[VulnIndicator]:
         indicators: list[VulnIndicator] = []
+        path = urlparse(ep.url).path
 
         for scheme in ep.security_schemes:
-            # JWT bearer
             if scheme.scheme_type == "http" and scheme.bearer_format.upper() == "JWT":
                 indicators.append(VulnIndicator(
                     pattern=VulnPattern.JWT_WEAKNESS,
                     confidence=RiskLevel.MEDIUM,
                     evidence=f"Security scheme: {scheme.scheme_name} (JWT bearer)",
                     description=(
-                        "JWT authentication detected. Test for algorithm confusion "
-                        "(none/HS256 vs RS256), weak signing keys, and token expiry."
+                        f"JWT bearer auth (scheme: {scheme.scheme_name}) on "
+                        f"{ep.method} {path}. Test for algorithm confusion "
+                        f"(none/HS256 vs RS256), weak signing keys, and "
+                        f"missing token expiry."
                     ),
                 ))
 
-            # API key in query string
             if scheme.scheme_type == "apiKey" and scheme.location == "query":
                 indicators.append(VulnIndicator(
                     pattern=VulnPattern.JWT_WEAKNESS,
                     confidence=RiskLevel.HIGH,
                     evidence=f"API key in query: {scheme.scheme_name}",
                     description=(
-                        "API key transmitted in query string — visible in logs, "
-                        "browser history, and referrer headers."
+                        f"{ep.method} {path} transmits API key "
+                        f"'{scheme.scheme_name}' in query string — visible "
+                        f"in server logs, browser history, and referrer headers."
                     ),
                 ))
 
-        # auth over HTTP (not HTTPS)
         if ep.url.startswith("http://") and ep.requires_auth:
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.JWT_WEAKNESS,
                 confidence=RiskLevel.HIGH,
                 evidence=f"Auth required over HTTP: {ep.url}",
                 description=(
-                    "Authenticated endpoint served over unencrypted HTTP. "
-                    "Credentials and tokens are exposed to network interception."
+                    f"{ep.method} {path} requires authentication but is "
+                    f"served over unencrypted HTTP. Credentials and tokens "
+                    f"are exposed to network interception."
                 ),
             ))
+
+        # detect JWT/Bearer from response headers or notes
+        if not indicators:
+            auth_header = ep.response_headers.get("www-authenticate", "")
+            notes_lower = ep.notes.lower()
+            if "bearer" in auth_header.lower() or "jwt" in notes_lower:
+                indicators.append(VulnIndicator(
+                    pattern=VulnPattern.JWT_WEAKNESS,
+                    confidence=RiskLevel.MEDIUM,
+                    evidence=f"Bearer/JWT detected in headers or notes: {auth_header or ep.notes[:60]}",
+                    description=(
+                        f"{ep.method} {path} uses JWT/Bearer auth (detected "
+                        f"from response headers). Test for algorithm confusion "
+                        f"and weak signing keys."
+                    ),
+                ))
 
         return indicators
 
@@ -724,9 +803,9 @@ class VulnPatternAnalyzer(BaseAgent):
             confidence=RiskLevel.HIGH,
             evidence=f"POST {path}",
             description=(
-                "State-changing financial or transactional endpoint. "
-                "Concurrent requests may exploit race conditions for "
-                "duplicate transactions or balance manipulation."
+                f"Transactional endpoint at POST {path}. Concurrent "
+                f"requests may exploit race conditions to duplicate "
+                f"transactions or manipulate balances."
             ),
         )]
 
@@ -739,17 +818,26 @@ class VulnPatternAnalyzer(BaseAgent):
         ai_params = _collect_param_names(ep) & _AI_PARAMS
         evidence_parts = [f"AI path: {path}"]
         if ai_params:
-            evidence_parts.append(f"input params: {', '.join(sorted(ai_params))}")
+            input_params = ", ".join(sorted(ai_params))
+            evidence_parts.append(f"input params: {input_params}")
+            desc = (
+                f"AI/LLM endpoint at {path} accepts free-text input via "
+                f"'{input_params}'. An attacker could inject prompts to "
+                f"override system instructions, exfiltrate the system "
+                f"prompt, or trigger unintended tool calls."
+            )
+        else:
+            desc = (
+                f"AI/LLM endpoint at {path} may accept user input. "
+                f"Test for prompt injection to override system instructions, "
+                f"extract training data, or trigger unintended actions."
+            )
 
         return [VulnIndicator(
             pattern=VulnPattern.PROMPT_INJECTION,
             confidence=RiskLevel.HIGH if ai_params else RiskLevel.MEDIUM,
             evidence="; ".join(evidence_parts),
-            description=(
-                "AI/LLM-powered endpoint that accepts user input. "
-                "Test for prompt injection to override system instructions, "
-                "extract training data, or trigger unintended actions."
-            ),
+            description=desc,
         )]
 
     @staticmethod
@@ -758,17 +846,18 @@ class VulnPatternAnalyzer(BaseAgent):
         if not _INFO_DISCLOSURE_PATHS.search(path):
             return []
 
-        # only flag if the endpoint is actually reachable
         if ep.status_code and ep.status_code >= 400:
             return []
 
+        status = f" [{ep.status_code}]" if ep.status_code else ""
         return [VulnIndicator(
             pattern=VulnPattern.INFO_DISCLOSURE,
             confidence=RiskLevel.HIGH,
-            evidence=f"Accessible sensitive path: {ep.method} {path} [{ep.status_code}]",
+            evidence=f"Accessible sensitive path: {ep.method} {path}{status}",
             description=(
-                "Endpoint exposes internal configuration, debug, or administrative "
-                "interface that may leak sensitive operational details."
+                f"Sensitive path {path} returned HTTP "
+                f"{ep.status_code or 'unknown'} — may expose internal "
+                f"configuration, debug info, or admin interfaces."
             ),
         )]
 
@@ -776,13 +865,14 @@ class VulnPatternAnalyzer(BaseAgent):
     def _check_auth_boundary(ep: Endpoint) -> list[VulnIndicator]:
         if ep.requires_auth is not False:
             return []
-        path = urlparse(ep.url).path.lower()
+        path = urlparse(ep.url).path
+        path_lower = path.lower()
         data_patterns = (
             "/user", "/account", "/profile", "/transaction",
             "/balance", "/card", "/order", "/payment",
             "/message", "/notification",
         )
-        if not any(seg in path for seg in data_patterns):
+        if not any(seg in path_lower for seg in data_patterns):
             return []
 
         return [VulnIndicator(
@@ -790,8 +880,9 @@ class VulnPatternAnalyzer(BaseAgent):
             confidence=RiskLevel.HIGH,
             evidence=f"No auth required: {ep.method} {path}",
             description=(
-                "Data endpoint classified as not requiring authentication. "
-                "Verify whether sensitive user data is accessible without credentials."
+                f"{ep.method} {path} returns data without authentication. "
+                f"If this endpoint exposes user-specific resources, any "
+                f"unauthenticated caller can access them."
             ),
         )]
 
@@ -800,13 +891,16 @@ class VulnPatternAnalyzer(BaseAgent):
         sensitive = {f.lower() for f in ep.response_fields} & _SENSITIVE_RESPONSE_FIELDS
         if not sensitive:
             return []
+        path = urlparse(ep.url).path
+        field_list = ", ".join(sorted(sensitive))
         return [VulnIndicator(
             pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
             confidence=RiskLevel.HIGH,
-            evidence=f"Sensitive response fields: {', '.join(sorted(sensitive))}",
+            evidence=f"Sensitive response fields: {field_list}",
             description=(
-                "API response schema includes fields containing credentials or "
-                "PII that should not be returned to clients."
+                f"Response schema for {ep.method} {path} includes "
+                f"sensitive fields ({field_list}). Strip credentials "
+                f"and PII before returning data to clients."
             ),
         )]
 
@@ -817,6 +911,7 @@ class VulnPatternAnalyzer(BaseAgent):
         if not body:
             return []
 
+        path = urlparse(ep.url).path
         indicators: list[VulnIndicator] = []
 
         match = _STACK_TRACE_PATTERN.search(body)
@@ -825,16 +920,23 @@ class VulnPatternAnalyzer(BaseAgent):
                 pattern=VulnPattern.INFO_DISCLOSURE,
                 confidence=RiskLevel.HIGH,
                 evidence=f"Stack trace in response: {match.group(0)[:80]}",
-                description="Stack trace leaks internal paths and framework details.",
+                description=(
+                    f"Stack trace in {ep.method} {path} response leaks "
+                    f"internal file paths and framework details."
+                ),
             ))
 
         ips = _INTERNAL_IP_PATTERN.findall(body)
         if ips:
+            ip_list = ", ".join(ips[:3])
             indicators.append(VulnIndicator(
                 pattern=VulnPattern.INFO_DISCLOSURE,
                 confidence=RiskLevel.MEDIUM,
-                evidence=f"Internal IPs in response: {', '.join(ips[:3])}",
-                description="RFC 1918 addresses exposed, reveals infrastructure layout.",
+                evidence=f"Internal IPs in response: {ip_list}",
+                description=(
+                    f"RFC 1918 addresses ({ip_list}) in the response from "
+                    f"{ep.method} {path} reveal internal network layout."
+                ),
             ))
 
         match = _SQL_FRAGMENT_PATTERN.search(body)
@@ -843,7 +945,10 @@ class VulnPatternAnalyzer(BaseAgent):
                 pattern=VulnPattern.INFO_DISCLOSURE,
                 confidence=RiskLevel.HIGH,
                 evidence=f"SQL error in response: {match.group(0)[:80]}",
-                description="SQL error in output — potential injection surface, leaks DB type.",
+                description=(
+                    f"SQL error in {ep.method} {path} output — suggests "
+                    f"an injection surface and reveals the DB engine."
+                ),
             ))
 
         match = _API_KEY_TOKEN_PATTERN.search(body)
@@ -852,7 +957,10 @@ class VulnPatternAnalyzer(BaseAgent):
                 pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
                 confidence=RiskLevel.CRITICAL,
                 evidence=f"API key/token pattern: {match.group(0)[:30]}...",
-                description="API key or token pattern found in response body.",
+                description=(
+                    f"API key or token found in {ep.method} {path} response "
+                    f"body — could be used to impersonate the service."
+                ),
             ))
 
         emails = _EMAIL_PATTERN.findall(body)
@@ -861,7 +969,61 @@ class VulnPatternAnalyzer(BaseAgent):
                 pattern=VulnPattern.EXCESSIVE_DATA_EXPOSURE,
                 confidence=RiskLevel.MEDIUM,
                 evidence=f"Multiple emails in response: {', '.join(emails[:3])} + {len(emails)-3} more",
-                description="Bulk email addresses returned, likely over-fetching user records.",
+                description=(
+                    f"{len(emails)} email addresses in {ep.method} {path} "
+                    f"response — looks like over-fetching user records."
+                ),
+            ))
+
+        return indicators
+
+    @staticmethod
+    def _check_injection_surfaces(ep: Endpoint) -> list[VulnIndicator]:
+        """Detect params that suggest SQL injection, path traversal, or command injection."""
+        indicators: list[VulnIndicator] = []
+        path = urlparse(ep.url).path
+        params = _collect_param_names(ep)
+
+        sql_params = params & _SQL_INJECTION_PARAMS
+        if sql_params:
+            param_list = ", ".join(sorted(sql_params))
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.MEDIUM,
+                evidence=f"SQL-related params: {param_list}",
+                description=(
+                    f"Parameters ({param_list}) on {ep.method} {path} "
+                    f"suggest dynamic query construction. Test for SQL "
+                    f"injection via malformed input."
+                ),
+            ))
+
+        traversal_params = params & _PATH_TRAVERSAL_PARAMS
+        if traversal_params:
+            param_list = ", ".join(sorted(traversal_params))
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.MEDIUM,
+                evidence=f"File-path params: {param_list}",
+                description=(
+                    f"Parameters ({param_list}) on {ep.method} {path} "
+                    f"reference files or paths. Test for directory traversal "
+                    f"via ../ sequences."
+                ),
+            ))
+
+        cmd_params = params & _COMMAND_INJECTION_PARAMS
+        if cmd_params:
+            param_list = ", ".join(sorted(cmd_params))
+            indicators.append(VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.HIGH,
+                evidence=f"Command-related params: {param_list}",
+                description=(
+                    f"Parameters ({param_list}) on {ep.method} {path} "
+                    f"suggest OS command execution. Test for command "
+                    f"injection via shell metacharacters."
+                ),
             ))
 
         return indicators
@@ -879,6 +1041,13 @@ class VulnPatternAnalyzer(BaseAgent):
         cross_ref = self._format_all_endpoints_summary(state, all_endpoints)
         tech_context = self.build_tech_context(state)
         findings_context = self.build_findings_context(state)
+        insights_context = self.build_insights_context(state)
+        strategy_context = ""
+        if state.scan_strategy and state.scan_strategy.priority_patterns:
+            strategy_context = (
+                f"\nPriority Patterns (from planner): "
+                f"{', '.join(state.scan_strategy.priority_patterns)}\n"
+            )
 
         total_additions = 0
         for i in range(0, len(all_endpoints), LLM_VULN_BATCH_SIZE):
@@ -891,7 +1060,8 @@ class VulnPatternAnalyzer(BaseAgent):
                         "role": "user",
                         "content": (
                             f"Target: {state.target}\n\n"
-                            f"Tech Stack:\n{tech_context}\n\n"
+                            f"Prior Insights:\n{insights_context}\n\n"
+                            f"Tech Stack:\n{tech_context}{strategy_context}\n\n"
                             f"Prior Findings:\n{findings_context}\n\n"
                             f"All Endpoints Summary (for cross-referencing):\n{cross_ref}\n\n"
                             f"BATCH TO ANALYZE ({len(batch)} endpoints):\n{batch_context}"
@@ -1029,6 +1199,7 @@ class VulnPatternAnalyzer(BaseAgent):
             auth_values = {a for _, a in auth_set}
             if len(auth_values) > 1 and None not in auth_values:
                 for key, ver, ep in versions:
+                    path = urlparse(ep.url).path
                     results.setdefault(key, []).append(VulnIndicator(
                         pattern=VulnPattern.API_VERSION_CONFUSION,
                         confidence=RiskLevel.HIGH,
@@ -1037,9 +1208,10 @@ class VulnPatternAnalyzer(BaseAgent):
                             f"other versions differ"
                         ),
                         description=(
-                            "Same resource exists across API versions with inconsistent "
-                            "authentication requirements. Older versions may lack "
-                            "security controls added in newer versions."
+                            f"{ep.method} {path} (v{ver}, auth={ep.requires_auth}) "
+                            f"has inconsistent auth requirements compared to other "
+                            f"API versions of {resource}. Older versions may lack "
+                            f"security controls added in newer versions."
                         ),
                     ))
         return results
@@ -1058,14 +1230,15 @@ class VulnPatternAnalyzer(BaseAgent):
                 continue
             if ep.status_code and ep.status_code >= 400:
                 continue
+            status = f" [{ep.status_code}]" if ep.status_code else ""
             results.setdefault(key, []).append(VulnIndicator(
                 pattern=VulnPattern.BROKEN_FUNCTION_LEVEL_AUTH,
                 confidence=RiskLevel.CRITICAL,
-                evidence=f"Admin/debug path without auth: {ep.method} {path} [{ep.status_code}]",
+                evidence=f"Admin/debug path without auth: {ep.method} {path}{status}",
                 description=(
-                    "Administrative or debug endpoint is accessible without "
-                    "authentication, potentially allowing privilege escalation "
-                    "or sensitive data access."
+                    f"Admin/debug path {path} is accessible without auth "
+                    f"(HTTP {ep.status_code or 'unknown'}). Could allow "
+                    f"privilege escalation or access to operational data."
                 ),
             ))
         return results

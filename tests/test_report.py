@@ -29,6 +29,11 @@ from src.ghost_hunter.report import (
 )
 
 
+def _minimal_state() -> ScanState:
+    """Create a minimal ScanState for tests that need one."""
+    return ScanState(target="test.com", base_url="https://test.com")
+
+
 class TestComputeMaxTokens:
     def test_small_scan_uses_base(self):
         """A scan with 0 findings should return the base token count."""
@@ -109,6 +114,58 @@ class TestFormatFinding:
             detail="detail",
         )
         assert "Evidence:" not in _format_finding(f)
+
+    def test_finding_with_matching_endpoint(self):
+        """When state has a matching endpoint, params and auth are included."""
+        ep = Endpoint(
+            url="https://test.com/api/chat",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+            parameters=["message"],
+            requires_auth=True,
+            response_fields=["response", "status"],
+        )
+        state = _minimal_state()
+        state.add_endpoint(ep)
+        f = Finding(
+            agent_name="vuln_analyzer",
+            finding_type="vuln_prompt_injection",
+            title="PROMPT_INJECTION — POST https://test.com/api/chat",
+            detail="AI endpoint",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding(f, state)
+        assert "Params: message" in result
+        assert "Auth: requires_auth" in result
+        assert "Response fields: response, status" in result
+
+    def test_finding_without_matching_endpoint(self):
+        """When state has no matching endpoint, no crash and no extra lines."""
+        state = _minimal_state()
+        f = Finding(
+            agent_name="vuln_analyzer",
+            finding_type="vuln_prompt_injection",
+            title="PROMPT_INJECTION — POST https://test.com/api/nonexistent",
+            detail="AI endpoint",
+            severity=RiskLevel.HIGH,
+        )
+        result = _format_finding(f, state)
+        assert "Params:" not in result
+        assert "[HIGH]" in result
+
+    def test_finding_without_dash_separator(self):
+        """Findings without ' — ' in title don't attempt endpoint lookup."""
+        state = _minimal_state()
+        f = Finding(
+            agent_name="vuln_analyzer",
+            finding_type="vuln_pattern_analysis",
+            title="Identified 5 vulnerability indicators across 3 endpoints",
+            detail="Pattern distribution: ...",
+            severity=RiskLevel.INFO,
+        )
+        result = _format_finding(f, state)
+        assert "Params:" not in result
+        assert "[INFO]" in result
 
 
 class TestBuildCweReferenceBlock:
@@ -193,7 +250,7 @@ class TestBuildAttackSurfaceTable:
 
 class TestBuildFallbackReport:
     def test_includes_header(self):
-        """Fallback should contain target and duration."""
+        """Target and duration show up in the fallback."""
         state = ScanState(target="test.com", base_url="https://test.com")
         report = _build_fallback_report(state, duration=12.5)
         assert "test.com" in report
@@ -229,7 +286,7 @@ class TestBuildFallbackReport:
         assert "Minor issue" not in report
 
     def test_includes_tech_fingerprint(self):
-        """Fallback should include tech fingerprint if available."""
+        """Tech fingerprint gets a section in the fallback when present."""
         state = ScanState(
             target="test.com",
             base_url="https://test.com",
@@ -240,7 +297,7 @@ class TestBuildFallbackReport:
         assert "Target Profile" in report
 
     def test_includes_attack_surface_table(self):
-        """Fallback should include the attack surface table if entries exist."""
+        """Attack surface table renders when entries exist."""
         ep = Endpoint(
             url="https://test.com/admin",
             method="GET",
@@ -265,7 +322,7 @@ class TestBuildFallbackReport:
 
 class TestBuildReportContext:
     def test_includes_cwe_block(self):
-        """Report context sent to the LLM should include the CWE reference map."""
+        """CWE reference map should be in the context."""
         state = ScanState(target="test.com", base_url="https://test.com")
         context = _build_report_context(state, duration=10.0)
         assert "CWE REFERENCE MAP" in context
@@ -282,3 +339,39 @@ class TestBuildReportContext:
         assert "vulnbank.org" in context
         assert "42.0s" in context
         assert "passive_recon" in context
+
+    def test_attack_surface_includes_indicator_evidence(self):
+        """Attack surface section should include full indicator evidence and descriptions."""
+        ep = Endpoint(
+            url="https://test.com/api/chat",
+            method="POST",
+            discovered_by=DiscoverySource.CRAWL,
+            parameters=["message"],
+            requires_auth=True,
+            response_fields=["response"],
+        )
+        indicator = VulnIndicator(
+            pattern=VulnPattern.PROMPT_INJECTION,
+            confidence=RiskLevel.HIGH,
+            evidence="AI path: /api/chat; input params: message",
+            description="AI endpoint accepts free-text input",
+        )
+        entry = AttackSurfaceEntry(
+            endpoint=ep,
+            category=EndpointCategory.REST_API,
+            risk_level=RiskLevel.HIGH,
+            priority_rank=1,
+            rationale="AI endpoint",
+            vuln_indicators=[indicator],
+        )
+        state = ScanState(
+            target="test.com",
+            base_url="https://test.com",
+            attack_surface=[entry],
+        )
+        context = _build_report_context(state, duration=5.0)
+        assert "AI path: /api/chat; input params: message" in context
+        assert "AI endpoint accepts free-text input" in context
+        assert "Params: message" in context
+        assert "Auth: requires_auth" in context
+        assert "Response fields: response" in context
