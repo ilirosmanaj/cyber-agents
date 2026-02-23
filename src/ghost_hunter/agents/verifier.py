@@ -13,6 +13,7 @@ from src.ghost_hunter.models import (
     ScanState,
     VulnIndicator,
 )
+from src.ghost_hunter.models.llm_responses import VerifierBatchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -116,15 +117,17 @@ class VerifierAgent(BaseAgent):
             ]
 
             try:
-                data = await self.llm.chat_json(
-                    messages, name=f"verifier_batch_{batch_idx}", max_tokens=2048
+                response = await self.llm.chat_structured(
+                    messages, response_model=VerifierBatchResponse,
+                    name=f"verifier_batch_{batch_idx}", max_tokens=2048,
                 )
 
-                s, a, n = self._apply_actions(state, data.get("actions", []))
+                actions_as_dicts = [a.model_dump() for a in response.actions]
+                s, a, n = self._apply_actions(state, actions_as_dicts)
                 suppressed_count += s
                 adjusted_count += a
                 annotated_count += n
-                cross_cutting_notes.extend(data.get("cross_cutting_notes", []))
+                cross_cutting_notes.extend(response.cross_cutting_notes)
 
             except Exception as e:
                 errors.append(f"Verification batch {batch_idx} failed: {e}")

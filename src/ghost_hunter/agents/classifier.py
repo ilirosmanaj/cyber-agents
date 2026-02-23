@@ -16,6 +16,7 @@ from src.ghost_hunter.models import (
     RiskLevel,
     ScanState,
 )
+from src.ghost_hunter.models.llm_responses import ClassificationBatchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -196,37 +197,32 @@ class ClassifierAgent(BaseAgent):
             ]
 
             try:
-                data = await self.llm.chat_json(
-                    messages, name=f"classify_batch_{i // BATCH_SIZE}"
+                response = await self.llm.chat_structured(
+                    messages, response_model=ClassificationBatchResponse,
+                    name=f"classify_batch_{i // BATCH_SIZE}",
                 )
-                classifications = data.get("classifications", [])
 
-                for cls in classifications:
-                    batch_idx = cls.get("index")
-                    if batch_idx is None:
+                for cls in response.classifications:
+                    if cls.index is None:
                         # fallback to URL-based matching
-                        url = cls.get("url", "")
-                        method = cls.get("method", "GET")
-                        key = state.endpoint_key(method, url)
+                        key = state.endpoint_key(cls.method, cls.url)
                         if key not in state.endpoints:
                             continue
                         ep = state.endpoints[key]
                     else:
                         # index-based matching (1-indexed)
-                        list_idx = batch_idx - 1
+                        list_idx = cls.index - 1
                         if list_idx < 0 or list_idx >= len(batch):
                             continue
                         _, _, ep = batch[list_idx]
 
-                    category = cls.get("category", "unknown")
                     try:
-                        ep.category = EndpointCategory(category)
+                        ep.category = EndpointCategory(cls.category)
                     except ValueError:
                         ep.category = EndpointCategory.UNKNOWN
 
-                    auth = cls.get("requires_auth")
-                    if auth is not None:
-                        ep.requires_auth = auth
+                    if cls.requires_auth is not None:
+                        ep.requires_auth = cls.requires_auth
                     classified_count += 1
 
             except Exception as e:

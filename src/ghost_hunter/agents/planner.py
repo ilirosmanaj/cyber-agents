@@ -91,15 +91,9 @@ class PlannerAgent(BaseAgent):
         ]
 
         try:
-            data = await self.llm.chat_json(messages, name="planner_strategy", max_tokens=512)
-
-            strategy = ScanStrategy(
-                focus_areas=data.get("focus_areas", []),
-                skip_agents=data.get("skip_agents", []),
-                extra_paths_to_try=data.get("extra_paths_to_try", []),
-                tech_hypotheses=data.get("tech_hypotheses", []),
-                scan_depth=data.get("scan_depth", "normal"),
-                priority_patterns=data.get("priority_patterns", []),
+            strategy = await self.llm.chat_structured(
+                messages, response_model=ScanStrategy,
+                name="planner_strategy", max_tokens=2048,
             )
             state.scan_strategy = strategy
 

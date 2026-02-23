@@ -149,15 +149,11 @@ class Orchestrator:
                     ),
                 },
             ]
-            data = await self._llm_client.chat_json(
-                messages, name=f"insight_{phase.replace(', ', '_')}", max_tokens=512
+            insight = await self._llm_client.chat_structured(
+                messages, response_model=ScanInsight,
+                name=f"insight_{phase.replace(', ', '_')}", max_tokens=512,
             )
-            insight = ScanInsight(
-                phase=phase,
-                summary=data.get("summary", ""),
-                key_signals=data.get("key_signals", []),
-                recommended_focus=data.get("recommended_focus", []),
-            )
+            insight.phase = phase
             self.state.scan_insights.append(insight)
             logger.info("Insight generated for phase: %s", phase)
         except Exception as e:

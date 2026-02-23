@@ -18,6 +18,7 @@ from src.ghost_hunter.models import (
     RiskLevel,
     ScanState,
 )
+from src.ghost_hunter.models.llm_responses import JSAnalysisBatchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -302,13 +303,14 @@ class JSAnalyzerAgent(BaseAgent):
             ]
 
             try:
-                data = await self.llm.chat_json(
-                    messages, name=f"js_llm_batch_{batch_idx}", max_tokens=1024
+                response = await self.llm.chat_structured(
+                    messages, response_model=JSAnalysisBatchResponse,
+                    name=f"js_llm_batch_{batch_idx}", max_tokens=1024,
                 )
 
-                for ep_data in data.get("endpoints", []):
-                    path = ep_data.get("path", "")
-                    method = ep_data.get("method", "GET").upper()
+                for ep_data in response.endpoints:
+                    path = ep_data.path
+                    method = ep_data.method.upper()
                     if not path:
                         continue
 
@@ -323,11 +325,11 @@ class JSAnalyzerAgent(BaseAgent):
                             url=full_url,
                             method=method,
                             discovered_by=DiscoverySource.JS_LLM_ANALYSIS,
-                            notes=f"LLM JS analysis: {ep_data.get('evidence', '')}",
+                            notes=f"LLM JS analysis: {ep_data.evidence}",
                         )
                     )
 
-                auth_patterns.extend(data.get("auth_patterns", []))
+                auth_patterns.extend(response.auth_patterns)
 
             except Exception as e:
                 logger.warning(

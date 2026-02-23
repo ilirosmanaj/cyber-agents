@@ -25,6 +25,7 @@ from src.ghost_hunter.models import (
     VulnIndicator,
     VulnPattern,
 )
+from src.ghost_hunter.models.llm_responses import VulnAnalysisBatchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -1069,10 +1070,11 @@ class VulnPatternAnalyzer(BaseAgent):
                     },
                 ]
 
-                data = await self.llm.chat_json(
-                    messages, name=f"vuln_llm_batch_{i // LLM_VULN_BATCH_SIZE}"
+                response = await self.llm.chat_structured(
+                    messages, response_model=VulnAnalysisBatchResponse,
+                    name=f"vuln_llm_batch_{i // LLM_VULN_BATCH_SIZE}",
                 )
-                total_additions += self._process_llm_vuln_results(state, data, batch)
+                total_additions += self._process_llm_vuln_results(state, response, batch)
 
             except Exception as e:
                 logger.warning(
@@ -1146,29 +1148,32 @@ class VulnPatternAnalyzer(BaseAgent):
 
     @staticmethod
     def _process_llm_vuln_results(
-        state: ScanState, data: dict, batch: list[tuple[str, Endpoint]]
+        state: ScanState, data: VulnAnalysisBatchResponse, batch: list[tuple[str, Endpoint]]
     ) -> int:
         """Merge LLM output back into state vuln_indicators."""
         total = 0
         batch_keys = {key for key, _ in batch}
 
-        for analysis in data.get("endpoint_analyses", []):
-            ep_key = analysis.get("endpoint_key", "")
-            if ep_key not in batch_keys:
+        for analysis in data.endpoint_analyses:
+            if analysis.endpoint_key not in batch_keys:
                 continue
 
-            existing = state.vuln_indicators.get(ep_key, [])
-            _apply_suppressions(indicators=existing, suppressions=analysis.get("suppressions", []))
+            existing = state.vuln_indicators.get(analysis.endpoint_key, [])
+            _apply_suppressions(
+                indicators=existing,
+                suppressions=[s.model_dump() for s in analysis.suppressions],
+            )
             _apply_confidence_adjustments(
-                indicators=existing, adjustments=analysis.get("confidence_adjustments", [])
+                indicators=existing,
+                adjustments=[a.model_dump() for a in analysis.confidence_adjustments],
             )
             total += _apply_new_indicators(
                 state=state,
                 existing=existing,
-                ep_key=ep_key,
-                new_indicators=analysis.get("new_indicators", []),
+                ep_key=analysis.endpoint_key,
+                new_indicators=[i.model_dump() for i in analysis.new_indicators],
             )
-            state.vuln_indicators[ep_key] = existing
+            state.vuln_indicators[analysis.endpoint_key] = existing
 
         return total
 

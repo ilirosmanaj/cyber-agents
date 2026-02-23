@@ -17,6 +17,7 @@ from src.ghost_hunter.models import (
     ScanState,
     VulnIndicator,
 )
+from src.ghost_hunter.models.llm_responses import PrioritizationBatchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -293,10 +294,11 @@ class PrioritizerAgent(BaseAgent):
         ]
 
         try:
-            data = await self.llm.chat_json(
-                messages, name=f"prioritize_batch_{hash(batch[0][0]) % 1000}"
+            response = await self.llm.chat_structured(
+                messages, response_model=PrioritizationBatchResponse,
+                name=f"prioritize_batch_{hash(batch[0][0]) % 1000}",
             )
-            return self._parse_llm_response(state=state, data=data, batch=batch)
+            return self._parse_llm_response(state=state, data=response, batch=batch)
         except Exception as e:
             logger.warning("Prioritization LLM call failed: %s", e)
             return None
@@ -304,35 +306,32 @@ class PrioritizerAgent(BaseAgent):
     @staticmethod
     def _parse_llm_response(
         state: ScanState,
-        data: dict,
+        data: PrioritizationBatchResponse,
         batch: list[tuple[str, Endpoint]],
     ) -> list[AttackSurfaceEntry]:
         """Parse LLM response into AttackSurfaceEntry objects using index-based matching."""
         entries: list[AttackSurfaceEntry] = []
 
-        for entry_data in data.get("attack_surface", []):
-            batch_idx = entry_data.get("index")
-            if batch_idx is None:
+        for entry_data in data.attack_surface:
+            if entry_data.index is None:
                 # fallback to URL-based matching
-                url = entry_data.get("url", "")
-                method = entry_data.get("method", "GET")
-                ep = state.find_endpoint(method, url)
+                ep = state.find_endpoint(entry_data.method, entry_data.url)
                 if ep is None:
                     continue
-                ep_key = state.endpoint_key(method, url)
+                ep_key = state.endpoint_key(entry_data.method, entry_data.url)
             else:
-                list_idx = batch_idx - 1
+                list_idx = entry_data.index - 1
                 if list_idx < 0 or list_idx >= len(batch):
                     continue
                 ep_key, ep = batch[list_idx]
 
             try:
-                risk = RiskLevel(entry_data.get("risk_level", "info"))
+                risk = RiskLevel(entry_data.risk_level)
             except ValueError:
                 risk = RiskLevel.INFO
 
             try:
-                cat = EndpointCategory(entry_data.get("category", "unknown"))
+                cat = EndpointCategory(entry_data.category)
             except ValueError:
                 cat = ep.category or EndpointCategory.UNKNOWN
 
@@ -344,8 +343,8 @@ class PrioritizerAgent(BaseAgent):
                 category=cat,
                 risk_level=risk,
                 priority_rank=0,
-                rationale=entry_data.get("rationale", ""),
-                suggested_tests=entry_data.get("suggested_tests", []),
+                rationale=entry_data.rationale,
+                suggested_tests=entry_data.suggested_tests,
                 vuln_indicators=active_vulns,
             ))
 

@@ -6,11 +6,15 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import TypeVar
 
 from openai import AsyncOpenAI, RateLimitError
+from pydantic import BaseModel
 
 from src.ghost_hunter.clients.tracing import trace_generation
 from src.ghost_hunter.config import settings
+
+T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
@@ -133,3 +137,21 @@ class LLMClient:
             response_format={"type": "json_object"},
         )
         return json.loads(response.content)
+
+    async def chat_structured(
+        self,
+        messages: list[dict[str, str]],
+        response_model: type[T],
+        *,
+        name: str = "llm_call",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> T:
+        """Chat completion that returns a validated Pydantic model."""
+        data = await self.chat_json(
+            messages=messages,
+            name=name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response_model.model_validate(data)

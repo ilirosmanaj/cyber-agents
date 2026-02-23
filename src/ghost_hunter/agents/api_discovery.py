@@ -21,6 +21,7 @@ from src.ghost_hunter.models import (
     ScanState,
     SecuritySchemeInfo,
 )
+from src.ghost_hunter.models.llm_responses import APIGuessResponse
 
 logger = logging.getLogger(__name__)
 
@@ -769,17 +770,19 @@ class APIDiscoveryAgent(BaseAgent):
         ]
 
         try:
-            data = await self.llm.chat_json(messages, name="api_discovery_llm_guess")
-            guesses = data.get("guesses", [])
+            response = await self.llm.chat_structured(
+                messages, response_model=APIGuessResponse,
+                name="api_discovery_llm_guess",
+            )
 
             # deduplicate guesses by (method, resolved_path)
             seen_guesses: set[str] = set()
             validated = 0
             auth_protected = 0
 
-            for guess in guesses[:MAX_LLM_GUESSES_TO_VALIDATE]:
-                path = guess.get("path", "")
-                method = guess.get("method", "GET").upper()
+            for guess in response.guesses[:MAX_LLM_GUESSES_TO_VALIDATE]:
+                path = guess.path
+                method = guess.method.upper()
                 if not path:
                     continue
 
@@ -813,7 +816,7 @@ class APIDiscoveryAgent(BaseAgent):
                             status_code=resp.status_code,
                             discovered_by=DiscoverySource.LLM_API_GUESS,
                             requires_auth=True,
-                            notes=f"LLM guess (auth required): {guess.get('reason', '')}",
+                            notes=f"LLM guess (auth required): {guess.reason}",
                         )
                     )
                     validated += 1
@@ -827,14 +830,14 @@ class APIDiscoveryAgent(BaseAgent):
                             status_code=resp.status_code,
                             content_type=resp.headers.get("content-type", ""),
                             discovered_by=DiscoverySource.LLM_API_GUESS,
-                            notes=f"LLM guess: {guess.get('reason', '')}",
+                            notes=f"LLM guess: {guess.reason}",
                             response_body_snippet=self.extract_body_snippet(resp),
                         )
                     )
                     validated += 1
 
             if validated:
-                detail = f"Out of {len(guesses)} guesses, {validated} returned non-404 responses."
+                detail = f"Out of {len(response.guesses)} guesses, {validated} returned non-404 responses."
                 if auth_protected:
                     detail += f" {auth_protected} require authentication."
                 findings.append(

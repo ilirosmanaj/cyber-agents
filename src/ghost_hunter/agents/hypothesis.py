@@ -14,6 +14,7 @@ from src.ghost_hunter.models import (
     RiskLevel,
     ScanState,
 )
+from src.ghost_hunter.models.llm_responses import HypothesisResponse
 
 logger = logging.getLogger(__name__)
 
@@ -124,12 +125,15 @@ class HypothesisAgent(BaseAgent):
         ]
 
         try:
-            data = await self.llm.chat_json(messages, name="hypothesis_generation")
-            hypotheses = data.get("hypotheses", [])
+            response = await self.llm.chat_structured(
+                messages, response_model=HypothesisResponse,
+                name="hypothesis_generation",
+            )
 
             # sort by confidence so high-confidence get validated first
-            hypotheses.sort(
-                key=lambda h: _CONFIDENCE_ORDER.get(h.get("confidence", "low"), 2)
+            sorted_hypotheses = sorted(
+                response.hypotheses,
+                key=lambda h: _CONFIDENCE_ORDER.get(h.confidence, 2),
             )
 
             validated = 0
@@ -137,9 +141,9 @@ class HypothesisAgent(BaseAgent):
             total = 0
             seen: set[str] = set()
 
-            for hyp in hypotheses[:MAX_HYPOTHESES]:
-                path = hyp.get("path", "")
-                method = hyp.get("method", "GET").upper()
+            for hyp in sorted_hypotheses[:MAX_HYPOTHESES]:
+                path = hyp.path
+                method = hyp.method.upper()
                 if not path:
                     continue
 
@@ -183,8 +187,8 @@ class HypothesisAgent(BaseAgent):
                             discovered_by=DiscoverySource.LLM_HYPOTHESIS,
                             requires_auth=True,
                             notes=(
-                                f"Hypothesis ({hyp.get('confidence', '?')}): "
-                                f"{hyp.get('reasoning', '')}"
+                                f"Hypothesis ({hyp.confidence}): "
+                                f"{hyp.reasoning}"
                             ),
                         )
                     )
@@ -200,15 +204,15 @@ class HypothesisAgent(BaseAgent):
                         discovered_by=DiscoverySource.LLM_HYPOTHESIS,
                         response_body_snippet=self.extract_body_snippet(resp),
                         notes=(
-                            f"Hypothesis ({hyp.get('confidence', '?')}): "
-                            f"{hyp.get('reasoning', '')}"
+                            f"Hypothesis ({hyp.confidence}): "
+                            f"{hyp.reasoning}"
                         ),
                     )
                 )
                 validated += 1
 
             detail = (
-                f"LLM generated {len(hypotheses)} hypotheses. "
+                f"LLM generated {len(response.hypotheses)} hypotheses. "
                 f"After filtering known endpoints, {total} were probed. "
                 f"{validated} returned non-404 responses."
             )
