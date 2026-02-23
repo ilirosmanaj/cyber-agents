@@ -122,12 +122,14 @@ class LLMClient:
         *,
         name: str = "llm_call",
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """Chat completion that returns parsed JSON."""
         response = await self.chat(
             messages=messages,
             name=name,
             temperature=temperature,
+            max_tokens=max_tokens,
             response_format={"type": "json_object"},
         )
         return json.loads(response.content)

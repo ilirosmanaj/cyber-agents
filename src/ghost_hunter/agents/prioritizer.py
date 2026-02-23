@@ -130,7 +130,7 @@ class PrioritizerAgent(BaseAgent):
 
         for i in range(0, len(all_endpoints), PRIORITIZER_BATCH_SIZE):
             batch = all_endpoints[i : i + PRIORITIZER_BATCH_SIZE]
-            batch_entries = self._prioritize_batch(
+            batch_entries = await self._prioritize_batch(
                 state=state,
                 batch=batch,
                 tech_context=tech_context,
