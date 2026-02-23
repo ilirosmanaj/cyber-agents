@@ -86,13 +86,25 @@ class WebCrawlerAgent(BaseAgent):
         forms_found = 0
         seen_forms: set[str] = set()
 
-        while not queue.empty() and pages_crawled < settings.max_pages:
+        # compute effective limits from scan_depth strategy
+        max_pages = settings.max_pages
+        max_depth = settings.max_crawl_depth
+        if state.scan_strategy and state.scan_strategy.scan_depth:
+            depth_setting = state.scan_strategy.scan_depth
+            if depth_setting == "shallow":
+                max_pages = max(1, int(settings.max_pages * 0.25))
+                max_depth = max(1, int(settings.max_crawl_depth * 0.5))
+            elif depth_setting == "deep":
+                max_pages = int(settings.max_pages * 2)
+                max_depth = int(settings.max_crawl_depth * 1.5)
+
+        while not queue.empty() and pages_crawled < max_pages:
             url, depth = queue.get_nowait()
             normalized = _normalize_url(url)
 
             if normalized in visited:
                 continue
-            if depth > settings.max_crawl_depth:
+            if depth > max_depth:
                 continue
             if not self.http.is_same_origin(url):
                 continue

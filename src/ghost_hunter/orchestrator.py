@@ -12,7 +12,9 @@ from src.ghost_hunter.agents.verifier import MIN_INDICATORS_FOR_VERIFICATION
 from src.ghost_hunter.clients import AdaptiveHttpClient, LLMClient, trace_span
 from src.ghost_hunter.models import AgentResult, ScanState
 from src.ghost_hunter.models.insights import ScanInsight
+from src.ghost_hunter.models.llm_responses import ReanalysisRequest
 from src.ghost_hunter.output import print_agent_step
+from src.ghost_hunter.prompts import PromptRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +60,25 @@ class Orchestrator:
     ):
         self.state = state
         self._llm_client = llm_client
-        self._planner = PlannerAgent(http_client=http_client, llm_client=llm_client)
+        self._prompt_registry = PromptRegistry()
+        self._planner = PlannerAgent(
+            http_client=http_client,
+            llm_client=llm_client,
+            prompt_registry=self._prompt_registry,
+        )
         self._agents: dict[str, BaseAgent] = {
-            name: cls(http_client=http_client, llm_client=llm_client)
+            name: cls(
+                http_client=http_client,
+                llm_client=llm_client,
+                prompt_registry=self._prompt_registry,
+            )
             for name, cls in get_agent_registry().items()
             if name in AGENT_DEPS
         }
+
+    @property
+    def prompt_registry(self) -> PromptRegistry:
+        return self._prompt_registry
 
     _PLANNER_WAVE_TRIGGERS = {"web_crawler", "api_discovery", "js_analyzer"}
 
@@ -95,6 +110,9 @@ class Orchestrator:
                 # Invoke planner at decision points
                 if set(runnable) & self._PLANNER_WAVE_TRIGGERS:
                     await self._run_planner()
+
+                if "verifier" in runnable:
+                    await self._handle_reanalysis()
 
         return self.state
 
@@ -133,12 +151,7 @@ class Orchestrator:
             messages = [
                 {
                     "role": "system",
-                    "content": (
-                        "You are reviewing scan progress. Summarize what was learned in 2-3 sentences. "
-                        "Identify key signals that should inform the next analysis phase.\n\n"
-                        "Respond with JSON:\n"
-                        '{"summary": "...", "key_signals": [...], "recommended_focus": [...]}'
-                    ),
+                    "content": self._prompt_registry.get("insight").system_prompt,
                 },
                 {
                     "role": "user",
@@ -158,6 +171,43 @@ class Orchestrator:
             logger.info("Insight generated for phase: %s", phase)
         except Exception as e:
             logger.warning("Insight generation failed for phase %s (continuing): %s", phase, e)
+
+    async def _handle_reanalysis(self) -> None:
+        """Run targeted re-analysis for endpoints flagged by the verifier."""
+        pending = [
+            r for r in self.state.reanalysis_requests
+            if r.endpoint_key not in self.state.reanalyzed_keys
+        ]
+        if not pending:
+            return
+
+        by_agent: dict[str, list[ReanalysisRequest]] = {}
+        for req in pending:
+            by_agent.setdefault(req.target_agent, []).append(req)
+
+        for agent_name, reqs in by_agent.items():
+            agent = self._agents.get(agent_name)
+            if agent is None:
+                logger.warning("Reanalysis target agent not found: %s", agent_name)
+                continue
+
+            logger.info(
+                "Re-analyzing %d endpoints via %s",
+                len(reqs), agent_name,
+            )
+            try:
+                result = await agent.execute(self.state)
+                self.state.merge_agent_result(result)
+                print_agent_step(
+                    agent_name=agent_name,
+                    reason="reanalysis",
+                    result=result,
+                )
+            except Exception as e:
+                logger.warning("Reanalysis via %s failed: %s", agent_name, e)
+
+            for req in reqs:
+                self.state.reanalyzed_keys.add(req.endpoint_key)
 
     async def _run_agent(self, agent_name: str) -> AgentResult:
         agent = self._agents[agent_name]

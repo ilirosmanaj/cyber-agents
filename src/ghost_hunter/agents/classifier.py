@@ -1,4 +1,4 @@
-"""Classifier agent — LLM categorizes endpoints by type, auth requirement, and risk."""
+"""Classifier agent — LLM classifies ALL endpoints, rules override only highest-confidence cases."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from src.ghost_hunter.agents.registry import register_agent
 from src.ghost_hunter.agents.base import BaseAgent
+from src.ghost_hunter.config import settings
 from src.ghost_hunter.models import (
     AgentResult,
     Endpoint,
@@ -28,6 +29,8 @@ _MAX_NOTES_LENGTH = 120
 # max chars of response body snippet per endpoint in batch context
 _MAX_SNIPPET_IN_BATCH = 200
 
+# --- High-confidence rule overrides (applied AFTER LLM) ---
+
 _HEALTH_PATHS = re.compile(
     r"^/(?:health|healthz|readyz|status|ping|alive|ready)$", re.IGNORECASE
 )
@@ -35,51 +38,31 @@ _STATIC_EXTENSIONS = re.compile(
     r"\.(?:js|css|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|webp|avif|map)$",
     re.IGNORECASE,
 )
-_AUTH_PATHS = re.compile(
-    r"(?:/login|/logout|/register|/signup|/signin|/auth|/oauth|/callback|"
-    r"/password[_-]?reset|/token|/refresh)",
-    re.IGNORECASE,
-)
-_ADMIN_PATHS = re.compile(
-    r"(?:/admin|/dashboard|/management|/console)", re.IGNORECASE
-)
-_DEBUG_PATHS = re.compile(
-    r"(?:/debug|/actuator|/phpinfo|/__debug__|/trace|/profiler)", re.IGNORECASE
-)
-_DOC_PATHS = re.compile(
-    r"(?:/docs|/swagger|/redoc|/api-docs|/openapi|/documentation)", re.IGNORECASE
-)
-_GRAPHQL_PATHS = re.compile(r"(?:/graphql|/graphiql)", re.IGNORECASE)
+_STATIC_CONTENT_TYPES = frozenset({
+    "application/javascript", "text/css", "image/png",
+    "image/jpeg", "image/svg+xml",
+})
 
 
-def _pre_classify(ep: Endpoint) -> EndpointCategory | None:
-    """Deterministic pre-classification for obvious endpoints."""
+def _rule_override(ep: Endpoint) -> EndpointCategory | None:
+    """High-confidence rule overrides applied AFTER LLM classification.
+
+    Only overrides for near-100% confidence cases:
+    - Static file extensions → STATIC_ASSET
+    - Content-type MIME match → STATIC_ASSET
+    - Exact health paths → HEALTH_CHECK
+    """
     path = urlparse(ep.url).path
 
     if _STATIC_EXTENSIONS.search(path):
         return EndpointCategory.STATIC_ASSET
 
     ct = (ep.content_type or "").split(";")[0].strip()
-    if ct in ("application/javascript", "text/css", "image/png", "image/jpeg", "image/svg+xml"):
+    if ct in _STATIC_CONTENT_TYPES:
         return EndpointCategory.STATIC_ASSET
 
     if _HEALTH_PATHS.match(path):
         return EndpointCategory.HEALTH_CHECK
-
-    if _GRAPHQL_PATHS.search(path):
-        return EndpointCategory.GRAPHQL
-
-    if _DOC_PATHS.search(path):
-        return EndpointCategory.DOCUMENTATION
-
-    if _DEBUG_PATHS.search(path):
-        return EndpointCategory.DEBUG_ENDPOINT
-
-    if _ADMIN_PATHS.search(path):
-        return EndpointCategory.ADMIN_ENDPOINT
-
-    if _AUTH_PATHS.search(path):
-        return EndpointCategory.AUTH_ENDPOINT
 
     return None
 
@@ -107,28 +90,12 @@ class ClassifierAgent(BaseAgent):
                 f"{', '.join(state.scan_strategy.tech_hypotheses)}\n"
             )
 
-        # pass 1: deterministic pre-classification
-        llm_batch: list[tuple[int, str, Endpoint]] = []
-        pre_classified = 0
+        # pass 1: LLM classifies ALL endpoints
+        llm_batch: list[tuple[int, str, Endpoint]] = [
+            (idx, key, ep) for idx, (key, ep) in enumerate(all_endpoints)
+        ]
+        classified_count = 0
 
-        for idx, (key, ep) in enumerate(all_endpoints):
-            category = _pre_classify(ep)
-            if category is not None:
-                ep.category = category
-                if ep.requires_auth is None and ep.security_schemes:
-                    ep.requires_auth = True
-                elif ep.requires_auth is None and ep.status_code in (401, 403):
-                    ep.requires_auth = True
-                pre_classified += 1
-            else:
-                if ep.security_schemes and ep.requires_auth is None:
-                    ep.requires_auth = True
-                if ep.status_code in (401, 403) and ep.requires_auth is None:
-                    ep.requires_auth = True
-                llm_batch.append((idx, key, ep))
-
-        # pass 2: LLM classification for non-obvious endpoints
-        classified_count = pre_classified
         for i in range(0, len(llm_batch), BATCH_SIZE):
             batch = llm_batch[i : i + BATCH_SIZE]
             batch_data = self._build_batch_data(batch)
@@ -136,53 +103,7 @@ class ClassifierAgent(BaseAgent):
             messages = [
                 {
                     "role": "system",
-                    "content": (
-                        "CONTEXT:\n"
-                        "You are classifying web application endpoints discovered through multiple methods "
-                        "(crawling, OpenAPI spec parsing, JavaScript analysis, LLM hypothesis, common path "
-                        "probing). Your classifications feed directly into the vulnerability analyzer, so "
-                        "accurate categorization and auth assessment are critical for downstream security "
-                        "analysis.\n\n"
-                        "ROLE:\n"
-                        "You are a web application security analyst specializing in attack surface mapping. "
-                        "You understand REST conventions, authentication patterns, and how endpoint behavior "
-                        "signals its purpose.\n\n"
-                        "ACTION:\n"
-                        "For each endpoint, follow these steps:\n"
-                        "1. Examine the URL path, HTTP method, status code, content type, and parameters\n"
-                        "2. Assign a category based on the definitions below\n"
-                        "3. Assess authentication requirements based on the criteria below\n\n"
-                        "OVERLAP GUIDANCE:\n"
-                        "- Login/register forms → auth_endpoint (not form_action)\n"
-                        "- Admin login → admin_endpoint\n"
-                        "- POST /graphql → graphql (not rest_api)\n\n"
-                        "CATEGORY DEFINITIONS:\n"
-                        "- rest_api: RESTful data endpoints (CRUD on resources, JSON responses, parameterized paths)\n"
-                        "- form_action: HTML form submission targets (POST with form-encoded data, contact forms)\n"
-                        "- static_asset: CSS, JS, images, fonts, or other static files\n"
-                        "- auth_endpoint: Login, logout, register, password reset, token refresh, OAuth callbacks\n"
-                        "- admin_endpoint: Administrative panels, user management, system configuration, dashboards\n"
-                        "- debug_endpoint: Debug tools, profilers, stack traces, actuator endpoints, phpinfo\n"
-                        "- documentation: API docs, Swagger UI, ReDoc, developer guides\n"
-                        "- health_check: Health, readiness, liveness probes\n"
-                        "- graphql: GraphQL query endpoints\n"
-                        "- unknown: Cannot determine from available information\n\n"
-                        "AUTH ASSESSMENT CRITERIA:\n"
-                        "- true: Returns 401/403 without token, has security schemes (Bearer, API key), "
-                        "path contains /user/ /account/ /profile/ /admin/, operates on user-specific resources\n"
-                        "- false: Returns 200 without credentials, serves public content, login/register, "
-                        "health check, documentation\n"
-                        "- null: Cannot determine\n\n"
-                        "FORMAT:\n"
-                        "Respond with JSON:\n"
-                        "{\n"
-                        '  "reasoning": "Brief observation about patterns in this batch",\n'
-                        '  "classifications": [\n'
-                        '    {"index": 1, "category": "...", "requires_auth": true|false|null}\n'
-                        "  ]\n"
-                        "}\n\n"
-                        "IMPORTANT: Use the index number to identify each endpoint. Do not repeat URLs."
-                    ),
+                    "content": self.prompt_registry.get("classifier").system_prompt,
                 },
                 {
                     "role": "user",
@@ -200,6 +121,7 @@ class ClassifierAgent(BaseAgent):
                 response = await self.llm.chat_structured(
                     messages, response_model=ClassificationBatchResponse,
                     name=f"classify_batch_{i // BATCH_SIZE}",
+                    confidence_threshold=settings.active_confidence_threshold,
                 )
 
                 for cls in response.classifications:
@@ -228,11 +150,30 @@ class ClassifierAgent(BaseAgent):
             except Exception as e:
                 errors.append(f"Classification batch {i // BATCH_SIZE} failed: {e}")
 
+        # pass 2: high-confidence rule overrides correct LLM mistakes
+        override_count = 0
+        for _key, ep in all_endpoints:
+            override = _rule_override(ep)
+            if override is not None and ep.category != override:
+                ep.category = override
+                override_count += 1
+            elif override is not None and ep.category is None:
+                ep.category = override
+                override_count += 1
+
+        # pass 3: auth inference from status codes / security schemes
+        for _key, ep in all_endpoints:
+            if ep.requires_auth is None and ep.security_schemes:
+                ep.requires_auth = True
+            if ep.requires_auth is None and ep.status_code in (401, 403):
+                ep.requires_auth = True
+
+        override_note = f" ({override_count} rule overrides)" if override_count else ""
         findings.append(
             Finding(
                 agent_name=self.name,
                 finding_type="classification_complete",
-                title=f"Classified {classified_count}/{len(all_endpoints)} endpoints",
+                title=f"Classified {classified_count}/{len(all_endpoints)} endpoints{override_note}",
                 detail=self._category_summary(state),
                 severity=RiskLevel.INFO,
             )

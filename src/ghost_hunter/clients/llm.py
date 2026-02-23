@@ -146,12 +146,67 @@ class LLMClient:
         name: str = "llm_call",
         temperature: float | None = None,
         max_tokens: int | None = None,
+        confidence_threshold: float | None = None,
+        retry_context: str = "",
     ) -> T:
-        """Chat completion that returns a validated Pydantic model."""
+        """Chat completion that returns a validated Pydantic model.
+
+        If ``confidence_threshold`` is set and the model has a ``confidence``
+        field, a single retry is attempted when confidence falls below the
+        threshold.  The retry prompt includes the first response as context.
+        """
         data = await self.chat_json(
             messages=messages,
             name=name,
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return response_model.model_validate(data)
+        result = response_model.model_validate(data)
+
+        if (
+            confidence_threshold is not None
+            and hasattr(result, "confidence")
+            and result.confidence is not None
+            and result.confidence < confidence_threshold
+        ):
+            logger.info(
+                "Low confidence %.2f (threshold %.2f), retrying %s",
+                result.confidence,
+                confidence_threshold,
+                name,
+            )
+            enhanced = self._build_retry_messages(
+                original_messages=messages,
+                first_result=result,
+                retry_context=retry_context,
+            )
+            data = await self.chat_json(
+                messages=enhanced,
+                name=f"{name}_retry",
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            result = response_model.model_validate(data)
+
+        return result
+
+    @staticmethod
+    def _build_retry_messages(
+        original_messages: list[dict[str, str]],
+        first_result: BaseModel,
+        retry_context: str,
+    ) -> list[dict[str, str]]:
+        """Build enhanced messages for a confidence-gated retry."""
+        enhanced = list(original_messages)
+        first_json = first_result.model_dump_json(indent=2)
+        retry_note = (
+            "Your previous response had low confidence. "
+            "Here it is for reference:\n\n"
+            f"{first_json}\n\n"
+            "Try again — be more specific and precise this time."
+        )
+        if retry_context:
+            retry_note += f"\n\nAdditional context:\n{retry_context}"
+        enhanced.append({"role": "assistant", "content": first_json})
+        enhanced.append({"role": "user", "content": retry_note})
+        return enhanced

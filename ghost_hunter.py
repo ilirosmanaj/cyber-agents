@@ -93,7 +93,10 @@ async def _run_scan(target: str, rate_limit: float | None, proxy: str | None) ->
     print_summary(state, duration)
     write_json_report(state, duration)
 
-    report_path = await generate_report(state=state, llm_client=llm_client, duration=duration)
+    report_path = await generate_report(
+        state=state, llm_client=llm_client, duration=duration,
+        prompt_registry=orchestrator.prompt_registry,
+    )
     print_report_path(report_path)
 
     flush_langfuse()

@@ -63,52 +63,7 @@ class HypothesisAgent(BaseAgent):
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "CONTEXT:\n"
-                    "You are part of a multi-agent security scanner. Prior agents have already discovered "
-                    "endpoints via crawling, OpenAPI spec parsing, common path probing, and JavaScript "
-                    "analysis. Your job is to hypothesize endpoints those methods missed. Each hypothesis "
-                    "costs one HTTP request to validate, so quality matters more than quantity.\n\n"
-                    "ROLE:\n"
-                    "You are a senior penetration tester with deep expertise in web application security "
-                    "and API reverse-engineering. You excel at inferring hidden endpoints from naming "
-                    "patterns, domain context, and tech stack conventions.\n\n"
-                    "ACTION:\n"
-                    "Follow this 5-step reasoning process:\n"
-                    "1. NAMING CONVENTIONS: Analyze the discovered endpoint naming scheme (snake_case, "
-                    "camelCase, kebab-case, plural/singular) and generate hypotheses that match\n"
-                    "2. DOMAIN INFERENCE: Infer the application domain from endpoint names and content. "
-                    "A banking app likely has /transfer, /statement, /beneficiary endpoints\n"
-                    "3. BLOCKED PATH EXPLOITATION: 403 responses on blocked paths hint at auth-walled "
-                    "content. Try sub-paths, alternative HTTP methods, or version variants\n"
-                    "4. SECURITY-SENSITIVE PATHS: Target admin panels, debug endpoints, backup files, "
-                    "internal APIs, password reset flows, and OAuth/SAML endpoints\n"
-                    "5. TECH-STACK SPECIFICS: Use known tech stack to guess framework-specific paths "
-                    "(e.g., Django: /admin/, Flask: /static/, Spring: /actuator/)\n\n"
-                    "Endpoint keys use the format 'METHOD URL' (e.g., 'GET https://example.com/api/users').\n\n"
-                    "FORMAT:\n"
-                    "Respond with JSON:\n"
-                    "{\n"
-                    '  "reasoning": "2-3 sentences about domain/pattern observations",\n'
-                    '  "hypotheses": [\n'
-                    '    {"path": "/...", "method": "GET", "confidence": "high|medium|low", '
-                    '"reasoning": "why this endpoint likely exists"}\n'
-                    "  ]\n"
-                    "}\n\n"
-                    "FEW-SHOT EXAMPLES:\n"
-                    "Given endpoints: GET /api/v1/accounts, GET /api/v1/accounts/{id}, "
-                    "POST /api/v1/transfer\n"
-                    "Good hypotheses:\n"
-                    '  {"path": "/api/v1/accounts/{id}/transactions", "method": "GET", '
-                    '"confidence": "high", "reasoning": "Banking app with accounts and transfers — '
-                    'transaction history per account is standard"}\n'
-                    '  {"path": "/api/v1/accounts/{id}/beneficiaries", "method": "GET", '
-                    '"confidence": "medium", "reasoning": "Transfer endpoint implies beneficiary '
-                    'management for recurring transfers"}\n'
-                    '  {"path": "/api/v2/accounts", "method": "GET", "confidence": "medium", '
-                    '"reasoning": "v1 exists, v2 may have different auth requirements"}\n\n'
-                    "Generate 15-25 hypotheses, prioritizing high-confidence ones."
-                ),
+                "content": self.prompt_registry.get("hypothesis").system_prompt,
             },
             {
                 "role": "user",

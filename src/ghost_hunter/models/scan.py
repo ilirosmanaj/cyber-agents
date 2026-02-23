@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from src.ghost_hunter.models.attack_surface import AttackSurfaceEntry, VulnIndicator
 from src.ghost_hunter.models.endpoints import Endpoint, Finding, TechFingerprint
 from src.ghost_hunter.models.insights import ScanInsight
+from src.ghost_hunter.models.llm_responses import ReanalysisRequest
 from src.ghost_hunter.models.strategy import ScanStrategy
 
 
@@ -37,6 +38,8 @@ class ScanState(BaseModel):
     agents_completed: list[str] = Field(default_factory=list)
     scan_insights: list[ScanInsight] = Field(default_factory=list)
     scan_strategy: ScanStrategy | None = None
+    reanalysis_requests: list[ReanalysisRequest] = Field(default_factory=list)
+    reanalyzed_keys: set[str] = Field(default_factory=set)
 
     def endpoint_key(self, method: str, url: str) -> str:
         return f"{method.upper()} {url.rstrip('/')}"

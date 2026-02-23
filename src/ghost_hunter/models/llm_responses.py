@@ -42,6 +42,7 @@ class VulnEndpointAnalysis(BaseModel):
 class VulnAnalysisBatchResponse(BaseModel):
     reasoning: str = ""
     endpoint_analyses: list[VulnEndpointAnalysis] = Field(default_factory=list)
+    confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,7 @@ class EndpointClassification(BaseModel):
 class ClassificationBatchResponse(BaseModel):
     reasoning: str = ""
     classifications: list[EndpointClassification] = Field(default_factory=list)
+    confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,7 @@ class AttackSurfaceItem(BaseModel):
 class PrioritizationBatchResponse(BaseModel):
     reasoning: str = ""
     attack_surface: list[AttackSurfaceItem] = Field(default_factory=list)
+    confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +111,18 @@ class VerifierAction(BaseModel):
     reason: str = ""
 
 
+class ReanalysisRequest(BaseModel):
+    endpoint_key: str
+    target_agent: str  # "classifier" or "vuln_analyzer"
+    reason: str = ""
+
+
 class VerifierBatchResponse(BaseModel):
     reasoning: str = ""
     actions: list[VerifierAction] = Field(default_factory=list)
     cross_cutting_notes: list[str] = Field(default_factory=list)
+    reanalysis_requests: list[ReanalysisRequest] = Field(default_factory=list)
+    confidence: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -143,3 +154,16 @@ class APIGuess(BaseModel):
 class APIGuessResponse(BaseModel):
     reasoning: str = ""
     guesses: list[APIGuess] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# 2i. Passive Recon — ReconAnalysisResponse
+# ---------------------------------------------------------------------------
+
+class ReconAnalysisResponse(BaseModel):
+    reasoning: str = ""
+    header_assessment: str = ""
+    tech_hypotheses: list[str] = Field(default_factory=list)
+    interesting_patterns: list[str] = Field(default_factory=list)
+    initial_attack_vectors: list[str] = Field(default_factory=list)
+    confidence: float | None = None

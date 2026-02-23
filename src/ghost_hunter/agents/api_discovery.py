@@ -716,47 +716,7 @@ class APIDiscoveryAgent(BaseAgent):
         messages = [
             {
                 "role": "system",
-                "content": (
-                    "CONTEXT:\n"
-                    "You are part of the API discovery pipeline. OpenAPI spec parsing and common path "
-                    "probing have already run. Your guesses should fill gaps those methods missed — "
-                    "undocumented endpoints, internal APIs, deprecated routes, and resource sub-paths.\n\n"
-                    "ROLE:\n"
-                    "You are an API security researcher who reverse-engineers web applications. You "
-                    "understand how developers structure APIs and where they leave undocumented endpoints.\n\n"
-                    "ACTION:\n"
-                    "Follow this 6-step reasoning process:\n"
-                    "1. NAMING SCHEME: Identify the API naming convention (snake_case, camelCase, "
-                    "kebab-case, plural vs singular) and match it in your guesses\n"
-                    "2. COMPLETE CRUD: For each resource with GET, check for POST/PUT/PATCH/DELETE. "
-                    "For collections, check for /{id} sub-resource\n"
-                    "3. INFER SUB-RESOURCES: /users/{id}/orders, /accounts/{id}/transactions — "
-                    "standard nested resource patterns\n"
-                    "4. ADMIN/INTERNAL VARIANTS: /admin/users, /internal/metrics, /debug/logs — "
-                    "endpoints developers forget to protect\n"
-                    "5. TECH-STACK PATHS: Framework-specific endpoints (Django /admin/, Spring "
-                    "/actuator/env, Express /debug, Flask /_debug_toolbar/)\n"
-                    "6. DEPRECATED ENDPOINTS: Check for /v1/ equivalents of /v2/ endpoints, "
-                    "/old/, /legacy/ prefixed paths\n\n"
-                    "FORMAT:\n"
-                    "Respond with JSON:\n"
-                    "{\n"
-                    '  "reasoning": "2-3 sentences about patterns and gaps observed",\n'
-                    '  "guesses": [\n'
-                    '    {"path": "/api/...", "method": "GET", "reason": "why this likely exists"}\n'
-                    "  ]\n"
-                    "}\n\n"
-                    "FEW-SHOT EXAMPLES:\n"
-                    "Given: GET /api/v1/users, POST /api/v1/users, GET /api/v1/orders\n"
-                    "Good guesses:\n"
-                    '  {"path": "/api/v1/users/{id}", "method": "GET", "reason": "Collection exists, '
-                    'individual resource lookup expected"}\n'
-                    '  {"path": "/api/v1/users/{id}", "method": "DELETE", "reason": "CRUD — create exists, '
-                    'delete likely available"}\n'
-                    '  {"path": "/api/v1/orders/{id}", "method": "GET", "reason": "Orders collection exists, '
-                    'individual order retrieval expected"}\n\n'
-                    "Keep it to 10-20 high-confidence guesses."
-                ),
+                "content": self.prompt_registry.get("api_discovery").system_prompt,
             },
             {
                 "role": "user",

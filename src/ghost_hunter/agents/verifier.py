@@ -22,32 +22,6 @@ _MAX_INDICATORS_PER_BATCH = 40
 _MAX_VERIFIER_CALLS = 2
 _MAX_ENDPOINT_CONTEXT = 60
 
-VERIFIER_SYSTEM_PROMPT = """\
-You are reviewing all vulnerability findings for internal consistency.
-
-For each inconsistency you find:
-1. Which signal is more trustworthy?
-2. Should any indicator be suppressed (with reason)?
-3. Should any confidence be adjusted?
-4. Are findings that look independent actually the same root cause?
-
-Be conservative: only suppress with clear justification.
-
-Respond with JSON:
-{
-  "reasoning": "2-3 sentence summary of consistency review",
-  "actions": [
-    {
-      "endpoint_key": "METHOD URL",
-      "action": "suppress|adjust_confidence|annotate",
-      "pattern": "vuln_pattern_value",
-      "new_confidence": "critical|high|medium|low|info",
-      "reason": "why this action is taken"
-    }
-  ],
-  "cross_cutting_notes": ["observation about cross-endpoint patterns"]
-}\
-"""
 
 
 @register_agent
@@ -102,7 +76,7 @@ class VerifierAgent(BaseAgent):
             batch_context = self._format_indicator_batch(batch_indicators)
 
             messages = [
-                {"role": "system", "content": VERIFIER_SYSTEM_PROMPT},
+                {"role": "system", "content": self.prompt_registry.get("verifier").system_prompt},
                 {
                     "role": "user",
                     "content": (
@@ -128,6 +102,7 @@ class VerifierAgent(BaseAgent):
                 adjusted_count += a
                 annotated_count += n
                 cross_cutting_notes.extend(response.cross_cutting_notes)
+                state.reanalysis_requests.extend(response.reanalysis_requests)
 
             except Exception as e:
                 errors.append(f"Verification batch {batch_idx} failed: {e}")

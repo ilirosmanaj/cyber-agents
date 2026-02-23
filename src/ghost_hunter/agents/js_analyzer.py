@@ -116,23 +116,6 @@ _MAX_TOTAL_SNIPPETS = 30
 _LLM_SNIPPET_BATCH_SIZE = 8
 _MAX_LLM_BATCHES = 3
 
-_JS_LLM_SYSTEM_PROMPT = """\
-You are a JavaScript security analyst extracting API information from code snippets.
-
-For each snippet, identify:
-1. API endpoints the code calls (that regex-based extraction might miss)
-2. Authentication patterns (how tokens are stored/sent)
-3. Custom API client patterns (wrappers around fetch/axios)
-
-Respond with JSON:
-{
-  "endpoints": [
-    {"path": "/api/...", "method": "GET|POST|PUT|DELETE|PATCH", "evidence": "brief reason"}
-  ],
-  "auth_patterns": ["description of auth pattern found"],
-  "notes": "any other security-relevant observations"
-}\
-"""
 
 
 @register_agent
@@ -205,11 +188,16 @@ class JSAnalyzerAgent(BaseAgent):
             endpoints.extend(eps)
 
         # LLM pass: analyze collected snippets for endpoints regex missed
-        llm_endpoints, llm_findings = await self._llm_analyze_snippets(
+        llm_endpoints, llm_findings, auth_patterns = await self._llm_analyze_snippets(
             all_snippets, extracted_paths
         )
         endpoints.extend(llm_endpoints)
         findings.extend(llm_findings)
+
+        # write auth patterns to tech fingerprint
+        for pattern in auth_patterns:
+            if pattern not in state.tech_fingerprint.technologies:
+                state.tech_fingerprint.technologies.append(pattern)
 
         if extracted_paths:
             findings.append(
@@ -273,13 +261,13 @@ class JSAnalyzerAgent(BaseAgent):
         self,
         snippets: list[str],
         regex_found: set[str],
-    ) -> tuple[list[Endpoint], list[Finding]]:
+    ) -> tuple[list[Endpoint], list[Finding], list[str]]:
         """Send collected JS snippets to LLM for semantic analysis."""
         endpoints: list[Endpoint] = []
         findings: list[Finding] = []
 
         if not snippets:
-            return endpoints, findings
+            return endpoints, findings, []
 
         llm_found_count = 0
         auth_patterns: list[str] = []
@@ -295,7 +283,7 @@ class JSAnalyzerAgent(BaseAgent):
             )
 
             messages = [
-                {"role": "system", "content": _JS_LLM_SYSTEM_PROMPT},
+                {"role": "system", "content": self.prompt_registry.get("js_analyzer").system_prompt},
                 {
                     "role": "user",
                     "content": f"Analyze these JavaScript code snippets:\n\n{snippet_text}",
@@ -349,19 +337,20 @@ class JSAnalyzerAgent(BaseAgent):
                 )
             )
 
+        unique_auth_patterns: list[str] = []
         if auth_patterns:
-            unique_patterns = list(dict.fromkeys(auth_patterns))[:5]
+            unique_auth_patterns = list(dict.fromkeys(auth_patterns))[:5]
             findings.append(
                 Finding(
                     agent_name=self.name,
                     finding_type="js_auth_patterns",
-                    title=f"Detected {len(unique_patterns)} auth pattern(s) in JavaScript",
-                    detail="; ".join(unique_patterns),
+                    title=f"Detected {len(unique_auth_patterns)} auth pattern(s) in JavaScript",
+                    detail="; ".join(unique_auth_patterns),
                     severity=RiskLevel.MEDIUM,
                 )
             )
 
-        return endpoints, findings
+        return endpoints, findings, unique_auth_patterns
 
     def _extract_paths_from_js(
         self, text: str, js_url: str, seen: set[str]

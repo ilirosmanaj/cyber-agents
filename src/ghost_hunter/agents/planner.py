@@ -22,30 +22,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_ENDPOINT_CONTEXT = 60
 
-PLANNER_SYSTEM_PROMPT = """\
-You are a penetration test lead planning the next phase of a security scan.
-
-Given the current scan state, decide:
-1. What type of application is this? (SPA, API-only, CMS, banking app...)
-2. Where is the highest-value attack surface?
-3. Which agents should be skipped? (e.g., skip js_analyzer if no JS found)
-4. What extra paths should we probe that standard lists miss?
-5. What technology hypotheses can we form from the evidence?
-
-Valid agents that can be skipped: js_analyzer, hypothesis, api_discovery
-
-Respond with JSON:
-{
-  "focus_areas": ["area1", "area2"],
-  "skip_agents": [],
-  "extra_paths_to_try": ["/path1", "/path2"],
-  "tech_hypotheses": ["hypothesis1"],
-  "scan_depth": "normal",
-  "priority_patterns": ["pattern1"]
-}
-
-Be conservative with skip_agents — only skip when there's clear evidence an agent would be wasteful.\
-"""
 
 
 class PlannerAgent(BaseAgent):
@@ -76,7 +52,7 @@ class PlannerAgent(BaseAgent):
             )
 
         messages = [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": self.prompt_registry.get("planner").system_prompt},
             {
                 "role": "user",
                 "content": (

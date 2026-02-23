@@ -729,7 +729,10 @@ class TestInjectionSurfaces:
             parameters=["query", "filter"],
         )
         indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
-        assert any("SQL-related params" in ind.evidence for ind in indicators)
+        assert any(
+            ind.pattern == VulnPattern.SQL_INJECTION and "SQL-related params" in ind.evidence
+            for ind in indicators
+        )
 
     def test_path_traversal_params(self):
         """Params like 'file' and 'path' flag path traversal surface."""
@@ -738,7 +741,10 @@ class TestInjectionSurfaces:
             parameters=["file"],
         )
         indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
-        assert any("File-path params" in ind.evidence for ind in indicators)
+        assert any(
+            ind.pattern == VulnPattern.PATH_TRAVERSAL and "File-path params" in ind.evidence
+            for ind in indicators
+        )
 
     def test_command_injection_params(self):
         """Params like 'cmd' and 'host' flag command injection at HIGH confidence."""
@@ -748,7 +754,9 @@ class TestInjectionSurfaces:
         )
         indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
         assert any(
-            "Command-related params" in ind.evidence and ind.confidence == RiskLevel.HIGH
+            ind.pattern == VulnPattern.COMMAND_INJECTION
+            and "Command-related params" in ind.evidence
+            and ind.confidence == RiskLevel.HIGH
             for ind in indicators
         )
 

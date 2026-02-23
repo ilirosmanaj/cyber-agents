@@ -17,6 +17,7 @@ from src.ghost_hunter.models import (
     ScanState,
     TechFingerprint,
 )
+from src.ghost_hunter.models.llm_responses import ReconAnalysisResponse
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,10 @@ class PassiveReconAgent(BaseAgent):
         eps, errs = await self._probe_well_known(state)
         endpoints.extend(eps)
         errors.extend(errs)
+
+        # --- LLM analysis of collected recon data ---
+        llm_findings = await self._llm_analyze_recon(state)
+        findings.extend(llm_findings)
 
         return AgentResult(
             agent_name=self.name,
@@ -292,3 +297,94 @@ class PassiveReconAgent(BaseAgent):
                 )
 
         return endpoints, errors
+
+    async def _llm_analyze_recon(self, state: ScanState) -> list[Finding]:
+        """Analyze collected recon data with LLM to produce structured intelligence."""
+        findings: list[Finding] = []
+        fp = state.tech_fingerprint
+
+        # build context from all collected recon data
+        context_parts: list[str] = []
+
+        if fp.server:
+            context_parts.append(f"Server: {fp.server}")
+        if fp.frameworks:
+            context_parts.append(f"Frameworks: {', '.join(fp.frameworks)}")
+        if fp.security_headers:
+            headers_str = ", ".join(f"{k}: {v}" for k, v in fp.security_headers.items())
+            context_parts.append(f"Security headers present: {headers_str}")
+        if fp.missing_security_headers:
+            context_parts.append(f"Missing security headers: {', '.join(fp.missing_security_headers)}")
+        if fp.cookies:
+            context_parts.append(f"Cookies: {', '.join(fp.cookies)}")
+        if state.blocked_paths:
+            context_parts.append(f"Disallowed paths (robots.txt): {', '.join(state.blocked_paths[:20])}")
+
+        well_known_notes: list[str] = []
+        for ep in state.endpoints.values():
+            if ep.discovered_by == DiscoverySource.HEADER_PROBE:
+                well_known_notes.append(f"{ep.url} [{ep.status_code}]")
+        if well_known_notes:
+            context_parts.append(f"Well-known path results: {', '.join(well_known_notes)}")
+
+        if not context_parts:
+            return findings
+
+        messages = [
+            {
+                "role": "system",
+                "content": self.prompt_registry.get("passive_recon").system_prompt,
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Target: {state.target}\n\n"
+                    f"Reconnaissance data:\n" + "\n".join(context_parts)
+                ),
+            },
+        ]
+
+        try:
+            response = await self.llm.chat_structured(
+                messages, response_model=ReconAnalysisResponse,
+                name="recon_analysis", max_tokens=1024,
+            )
+
+            # write tech hypotheses to state
+            for hypothesis in response.tech_hypotheses:
+                if hypothesis not in fp.technologies:
+                    fp.technologies.append(hypothesis)
+
+            if response.header_assessment:
+                findings.append(Finding(
+                    agent_name=self.name,
+                    finding_type="recon_header_assessment",
+                    title="LLM header security assessment",
+                    detail=response.header_assessment,
+                    severity=RiskLevel.INFO,
+                ))
+
+            if response.interesting_patterns:
+                findings.append(Finding(
+                    agent_name=self.name,
+                    finding_type="recon_interesting_patterns",
+                    title=f"Identified {len(response.interesting_patterns)} interesting pattern(s)",
+                    detail="; ".join(response.interesting_patterns),
+                    severity=RiskLevel.INFO,
+                ))
+
+            if response.initial_attack_vectors:
+                findings.append(Finding(
+                    agent_name=self.name,
+                    finding_type="recon_attack_vectors",
+                    title=f"Suggested {len(response.initial_attack_vectors)} initial attack vector(s)",
+                    detail="; ".join(response.initial_attack_vectors),
+                    severity=RiskLevel.INFO,
+                ))
+
+        except Exception as e:
+            logger.warning(
+                "LLM recon analysis failed (deterministic results intact): %s", e,
+            )
+
+        return findings

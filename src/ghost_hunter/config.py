@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     max_pages: int = 200
     max_js_files: int = 50
 
+    # confidence-gated re-analysis
+    reanalysis_confidence_threshold: float = 0.6
+    reanalysis_enabled: bool = True
+
+    @property
+    def active_confidence_threshold(self) -> float | None:
+        """Return threshold if re-analysis is enabled, None otherwise."""
+        return self.reanalysis_confidence_threshold if self.reanalysis_enabled else None
+
     @property
     def langfuse_enabled(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)

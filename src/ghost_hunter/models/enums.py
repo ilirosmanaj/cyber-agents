@@ -62,3 +62,6 @@ class VulnPattern(str, Enum):
     EXCESSIVE_DATA_EXPOSURE = "excessive_data_exposure"
     BROKEN_FUNCTION_LEVEL_AUTH = "broken_function_level_auth"
     CHAINED_VULNERABILITY = "chained_vulnerability"
+    SQL_INJECTION = "sql_injection"
+    PATH_TRAVERSAL = "path_traversal"
+    COMMAND_INJECTION = "command_injection"

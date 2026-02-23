@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import httpx
 
 from src.ghost_hunter.clients import AdaptiveHttpClient, LLMClient, trace_span
 from src.ghost_hunter.models import AgentResult, ScanState
+
+if TYPE_CHECKING:
+    from src.ghost_hunter.prompts import PromptRegistry
 
 # cap on blocked paths included in LLM context to avoid token bloat
 _MAX_BLOCKED_PATHS_IN_CONTEXT = 10
@@ -23,9 +27,15 @@ class BaseAgent(ABC):
     name: str = "base"
     description: str = ""
 
-    def __init__(self, http_client: AdaptiveHttpClient, llm_client: LLMClient):
+    def __init__(
+        self,
+        http_client: AdaptiveHttpClient,
+        llm_client: LLMClient,
+        prompt_registry: PromptRegistry | None = None,
+    ):
         self.http = http_client
         self.llm = llm_client
+        self.prompt_registry = prompt_registry
 
     async def execute(self, state: ScanState) -> AgentResult:
         """Execute the agent with tracing. Sub-classes implement run()."""

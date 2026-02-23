@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from src.ghost_hunter.agents.base import BaseAgent
 from src.ghost_hunter.agents.registry import register_agent
+from src.ghost_hunter.config import settings
 from src.ghost_hunter.models import (
     AgentResult,
     Endpoint,
@@ -37,96 +38,6 @@ _MAX_RESPONSE_FIELDS_PER_ENDPOINT = 25
 # severity ordering for comparison — lower index = higher severity
 _SEVERITY_ORDER = {level: idx for idx, level in enumerate(RiskLevel)}
 
-VULN_ANALYSIS_SYSTEM_PROMPT = """\
-You are a principal application security researcher performing deep vulnerability analysis \
-on web application endpoints.
-
-CONTEXT:
-You are the second pass of a two-pass vulnerability analyzer. Pass 1 (deterministic regex/set \
-matching) has already run and produced initial indicators. Your job is to refine, enhance, and \
-extend those results using semantic reasoning about the full application context.
-
-ROLE:
-Senior application security engineer specializing in API security, OWASP Top 10, and chained \
-attack vectors. You understand how individual vulnerabilities compound when combined.
-
-ACTION — Perform these 5 analyses on each endpoint batch:
-
-1. SEMANTIC VARIANT DETECTION
-   Identify vulnerability-relevant fields/params that regex missed. Examples:
-   - Mass assignment: account_tier, is_premium, subscription_level, membership_type, plan, \
-credit_limit, discount_rate, referral_bonus
-   - IDOR: resource_id, ref, reference_number, slug, uuid, code, token (when used as lookup)
-   - SSRF: endpoint, service_url, api_endpoint, forward_to, load_url, import_url
-   Report these as new_indicators with the appropriate pattern type.
-
-2. CHAINED VULNERABILITY IDENTIFICATION
-   Look for endpoints where multiple vulnerability patterns combine into a higher-severity \
-finding. Common chains:
-   - auth_boundary_gap + bola_idor = unauthenticated IDOR (CRITICAL)
-   - auth_boundary_gap + ssrf = unauthenticated SSRF (CRITICAL)
-   - auth_boundary_gap + excessive_data_exposure = unauthenticated data leak (CRITICAL)
-   - broken_function_level_auth + info_disclosure = admin data leak (CRITICAL)
-   - file_upload + no auth = unauthenticated file upload (HIGH)
-   Set chain_with to the endpoint key of related indicators.
-
-3. FALSE POSITIVE SUPPRESSION
-   Identify indicators that are likely false positives:
-   - info_disclosure on /swagger or /api-docs when an OpenAPI spec was already parsed as a finding
-   - BOLA on endpoints that are clearly public resources (e.g., /api/products/{id})
-   - Generic low-confidence mass_assignment on standard registration endpoints with no \
-dangerous fields
-   Provide a clear reason for each suppression.
-
-4. CONFIDENCE REFINEMENT
-   Adjust confidence levels based on full context:
-   - Upgrade: BOLA on a financial endpoint (e.g., /transfer/{account_number}) → CRITICAL
-   - Upgrade: SSRF on an unauthenticated endpoint → CRITICAL
-   - Downgrade: race_condition on an idempotent GET endpoint → LOW
-   - Downgrade: info_disclosure on a path that returned 403 → INFO
-
-5. CONTEXT-SPECIFIC DESCRIPTIONS
-   For new or refined indicators, write descriptions that reference the actual URL, \
-parameter names, tech stack, and business context rather than generic boilerplate.
-
-FORMAT:
-Respond with JSON:
-{
-  "reasoning": "2-3 sentences of chain-of-thought about patterns in this batch",
-  "endpoint_analyses": [
-    {
-      "endpoint_key": "METHOD URL",
-      "new_indicators": [
-        {
-          "pattern": "mass_assignment|bola_idor|ssrf|chained_vulnerability|...",
-          "confidence": "critical|high|medium|low|info",
-          "evidence": "specific evidence from the endpoint",
-          "description": "context-specific description",
-          "chain_with": "METHOD URL of related endpoint or null"
-        }
-      ],
-      "suppressions": [
-        {
-          "original_pattern": "info_disclosure|...",
-          "reason": "why this is a false positive"
-        }
-      ],
-      "confidence_adjustments": [
-        {
-          "original_pattern": "bola_idor|...",
-          "new_confidence": "critical|high|medium|low|info",
-          "reason": "why confidence changed"
-        }
-      ]
-    }
-  ]
-}
-
-TONE:
-Be precise and conservative. Only suppress indicators with clear justification. Only create \
-new indicators when there is concrete evidence. Chained vulnerabilities must reference specific \
-endpoint combinations.
-"""
 
 # ---------------------------------------------------------------------------
 # Pattern constants — compiled regexes and keyword sets
@@ -989,7 +900,7 @@ class VulnPatternAnalyzer(BaseAgent):
         if sql_params:
             param_list = ", ".join(sorted(sql_params))
             indicators.append(VulnIndicator(
-                pattern=VulnPattern.INFO_DISCLOSURE,
+                pattern=VulnPattern.SQL_INJECTION,
                 confidence=RiskLevel.MEDIUM,
                 evidence=f"SQL-related params: {param_list}",
                 description=(
@@ -1003,7 +914,7 @@ class VulnPatternAnalyzer(BaseAgent):
         if traversal_params:
             param_list = ", ".join(sorted(traversal_params))
             indicators.append(VulnIndicator(
-                pattern=VulnPattern.INFO_DISCLOSURE,
+                pattern=VulnPattern.PATH_TRAVERSAL,
                 confidence=RiskLevel.MEDIUM,
                 evidence=f"File-path params: {param_list}",
                 description=(
@@ -1017,7 +928,7 @@ class VulnPatternAnalyzer(BaseAgent):
         if cmd_params:
             param_list = ", ".join(sorted(cmd_params))
             indicators.append(VulnIndicator(
-                pattern=VulnPattern.INFO_DISCLOSURE,
+                pattern=VulnPattern.COMMAND_INJECTION,
                 confidence=RiskLevel.HIGH,
                 evidence=f"Command-related params: {param_list}",
                 description=(
@@ -1056,7 +967,7 @@ class VulnPatternAnalyzer(BaseAgent):
             try:
                 batch_context = self._format_batch_for_llm(state, batch)
                 messages = [
-                    {"role": "system", "content": VULN_ANALYSIS_SYSTEM_PROMPT},
+                    {"role": "system", "content": self.prompt_registry.get("vuln_analyzer").system_prompt},
                     {
                         "role": "user",
                         "content": (
@@ -1073,6 +984,7 @@ class VulnPatternAnalyzer(BaseAgent):
                 response = await self.llm.chat_structured(
                     messages, response_model=VulnAnalysisBatchResponse,
                     name=f"vuln_llm_batch_{i // LLM_VULN_BATCH_SIZE}",
+                    confidence_threshold=settings.active_confidence_threshold,
                 )
                 total_additions += self._process_llm_vuln_results(state, response, batch)
 
