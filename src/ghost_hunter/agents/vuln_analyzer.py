@@ -95,6 +95,10 @@ _RACE_PATHS = re.compile(
     re.IGNORECASE,
 )
 
+# categories where certain vuln checks produce false positives
+_AUTH_SAFE_CATEGORIES = {EndpointCategory.AUTH_ENDPOINT}
+_INJECTION_SKIP_CATEGORIES = {EndpointCategory.AUTH_ENDPOINT}
+
 # Prompt injection: AI-related paths and params
 _AI_PATHS = re.compile(
     r"(?:/ai/|/chat|/bot|/assistant|/llm|/gpt|/copilot|/generate|/complete|/predict)",
@@ -480,6 +484,9 @@ class VulnPatternAnalyzer(BaseAgent):
         indicators: list[VulnIndicator] = []
         path = urlparse(ep.url).path
 
+        if ep.category in _AUTH_SAFE_CATEGORIES:
+            return []
+
         match = _IDOR_PATH_PARAM.search(path)
         if match:
             param = match.group(0).strip("{}")
@@ -788,6 +795,8 @@ class VulnPatternAnalyzer(BaseAgent):
     def _check_auth_boundary(ep: Endpoint) -> list[VulnIndicator]:
         if ep.requires_auth is not False:
             return []
+        if ep.category in _AUTH_SAFE_CATEGORIES:
+            return []
         path = urlparse(ep.url).path
         path_lower = path.lower()
         data_patterns = (
@@ -905,6 +914,15 @@ class VulnPatternAnalyzer(BaseAgent):
         """Detect params that suggest SQL injection, path traversal, or command injection."""
         indicators: list[VulnIndicator] = []
         path = urlparse(ep.url).path
+
+        # AI endpoints are handled by _check_prompt_injection — their params
+        # (message, query, input, etc.) overlap with injection sets but the
+        # risk is prompt injection, not OS/SQL injection.
+        if _AI_PATHS.search(path):
+            return []
+        if ep.category in _INJECTION_SKIP_CATEGORIES:
+            return []
+
         params = _collect_param_names(ep)
 
         sql_params = params & _SQL_INJECTION_PARAMS
@@ -1046,9 +1064,6 @@ class VulnPatternAnalyzer(BaseAgent):
     ) -> int:
         """Convert body analysis findings into VulnIndicators."""
         added = 0
-        # associate all findings with the first endpoint in the batch if
-        # only one, otherwise distribute based on context (simplified: attach
-        # findings to all batch endpoints since the LLM sees them together)
         batch_keys = [key for key, _ in batch]
 
         for finding in response.findings:
@@ -1063,8 +1078,9 @@ class VulnPatternAnalyzer(BaseAgent):
             except ValueError:
                 confidence = RiskLevel.HIGH
 
-            # attach finding to first batch endpoint (LLM prompt is per-batch)
-            ep_key = batch_keys[0] if batch_keys else None
+            ep_key = self._match_finding_to_endpoint(
+                source_url=finding.source_url, batch_keys=batch_keys,
+            )
             if ep_key is None:
                 continue
 
@@ -1081,6 +1097,20 @@ class VulnPatternAnalyzer(BaseAgent):
             added += 1
 
         return added
+
+    @staticmethod
+    def _match_finding_to_endpoint(
+        source_url: str, batch_keys: list[str],
+    ) -> str | None:
+        """Match a finding's source_url to the correct batch endpoint key."""
+        if not batch_keys:
+            return None
+        if not source_url:
+            return batch_keys[0] if len(batch_keys) == 1 else None
+        for key in batch_keys:
+            if source_url in key or key.endswith(source_url):
+                return key
+        return batch_keys[0] if len(batch_keys) == 1 else None
 
     # ------------------------------------------------------------------
     # Pass 2: LLM analysis

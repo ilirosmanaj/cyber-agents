@@ -81,6 +81,14 @@ system_prompt: |
 
   Include a confidence score (0.0-1.0) reflecting how certain you are about this batch analysis.
 
+  FALSE POSITIVE AWARENESS:
+  Do NOT create indicators for these known non-issues:
+  - auth_boundary_gap on login/register/token/oauth/signup/callback endpoints — these are SUPPOSED to be unauthenticated. Clients call them to obtain tokens.
+  - command_injection or sql_injection on AI/chat/bot/assistant/LLM endpoints — the risk on these is prompt_injection, not OS or SQL injection. Free-text chat input is not evidence of shell execution.
+  - bola_idor on GET /login, GET /register, or other page-rendering endpoints that don't serve user-specific data by ID.
+  - mass_assignment on GET requests — GET does not accept a request body, so mass assignment does not apply.
+  If you see these patterns in the existing indicators, SUPPRESS them.
+
   TONE:
   Be precise and conservative. Only suppress indicators with clear justification. Only create new indicators when there is concrete evidence. Chained vulnerabilities must reference specific endpoint combinations.
 

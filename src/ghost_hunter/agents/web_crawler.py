@@ -473,8 +473,7 @@ class WebCrawlerAgent(BaseAgent):
     ) -> list[Finding]:
         """Convert LLM findings into Finding objects."""
         results: list[Finding] = []
-        # use the first page in the batch for the path in the finding title
-        first_path = urlparse(batch[0][0]).path if batch else "/"
+        batch_urls = [url for url, _ in batch]
 
         for finding in response.findings:
             if finding.is_placeholder:
@@ -483,19 +482,38 @@ class WebCrawlerAgent(BaseAgent):
             severity = self._FINDING_SEVERITY_MAP.get(
                 finding.finding_type, RiskLevel.MEDIUM
             )
-            # override severity with LLM confidence if it maps to a RiskLevel
             try:
                 severity = RiskLevel(finding.confidence)
             except ValueError:
                 pass
 
+            page_path = self._resolve_finding_path(
+                source_url=finding.source_url, batch_urls=batch_urls,
+            )
             results.append(Finding(
                 agent_name=self.name,
                 finding_type=finding.finding_type,
-                title=f"{finding.finding_type.replace('_', ' ').title()} on {first_path}",
+                title=f"{finding.finding_type.replace('_', ' ').title()} on {page_path}",
                 detail=finding.context,
                 severity=severity,
                 evidence=finding.evidence[:120],
             ))
 
         return results
+
+    @staticmethod
+    def _resolve_finding_path(
+        source_url: str, batch_urls: list[str],
+    ) -> str:
+        """Resolve which page a finding belongs to and return its path."""
+        fallback = urlparse(batch_urls[0]).path if batch_urls else "/"
+        if not source_url:
+            return fallback if len(batch_urls) == 1 else "/"
+        # try exact or substring match against batch URLs
+        for url in batch_urls:
+            if source_url in url or url.endswith(source_url):
+                return urlparse(url).path
+        # source_url might already be a path
+        if source_url.startswith("/"):
+            return source_url
+        return fallback

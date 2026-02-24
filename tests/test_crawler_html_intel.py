@@ -190,6 +190,78 @@ class TestHTMLIntelResultProcessing:
         assert len(results) == 1
         assert results[0].severity == RiskLevel.CRITICAL
 
+    def test_source_url_routes_to_correct_page(self):
+        """When source_url is set, the finding title uses the correct page path."""
+        crawler = _make_crawler()
+        response = HTMLIntelAnalysisResponse(
+            reasoning="Found secret on console, not register",
+            findings=[
+                HTMLIntelFinding(
+                    finding_type="leaked_secret",
+                    evidence="SECRET_KEY = ...",
+                    context="Secret in debug console",
+                    source_url="https://target.com/console",
+                    confidence="critical",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [
+            ("https://target.com/register", "register html"),
+            ("https://target.com/console", "console html"),
+        ]
+        results = crawler._process_html_intel_results(response, batch)
+
+        assert len(results) == 1
+        assert "/console" in results[0].title
+        assert "/register" not in results[0].title
+
+    def test_empty_source_url_single_batch_uses_only_page(self):
+        """When source_url is empty and batch has one page, that page is used."""
+        crawler = _make_crawler()
+        response = HTMLIntelAnalysisResponse(
+            reasoning="Found something",
+            findings=[
+                HTMLIntelFinding(
+                    finding_type="debug_indicator",
+                    evidence="DEBUG = True",
+                    context="Debug mode",
+                    confidence="high",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [("https://target.com/admin", "admin html")]
+        results = crawler._process_html_intel_results(response, batch)
+
+        assert len(results) == 1
+        assert "/admin" in results[0].title
+
+    def test_empty_source_url_multi_batch_uses_root(self):
+        """When source_url is empty and batch has multiple pages, path defaults to /."""
+        crawler = _make_crawler()
+        response = HTMLIntelAnalysisResponse(
+            reasoning="Found something",
+            findings=[
+                HTMLIntelFinding(
+                    finding_type="debug_indicator",
+                    evidence="DEBUG = True",
+                    context="Debug mode",
+                    confidence="high",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [
+            ("https://target.com/page1", "html1"),
+            ("https://target.com/page2", "html2"),
+        ]
+        results = crawler._process_html_intel_results(response, batch)
+
+        assert len(results) == 1
+        # can't determine which page, so falls back to /
+        assert results[0].title == "Debug Indicator on /"
+
 
 # ---------------------------------------------------------------------------
 # LLM pass integration

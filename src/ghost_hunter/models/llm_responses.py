@@ -164,6 +164,7 @@ class ResponseBodyFinding(BaseModel):
     finding_type: str  # "secret", "config_leak", "debug_info", "credential"
     value_redacted: str  # the secret with middle chars masked
     context: str  # surrounding context explaining what this is
+    source_url: str = ""  # which endpoint this finding belongs to
     confidence: str = "high"
     is_placeholder: bool = False  # true if it looks like a dummy/example value
 
@@ -182,6 +183,7 @@ class HTMLIntelFinding(BaseModel):
     finding_type: str  # "leaked_secret", "sensitive_comment", "debug_indicator"
     evidence: str  # the relevant snippet
     context: str  # explanation of what was found and why it matters
+    source_url: str = ""  # which page this finding belongs to
     confidence: str = "high"
     is_placeholder: bool = False  # true if it looks like a dummy/example value
 

@@ -56,6 +56,15 @@ class TestBOLAIDOR:
         indicators = VulnPatternAnalyzer._check_bola_idor(ep)
         assert not indicators
 
+    def test_auth_endpoint_no_idor(self):
+        """Auth endpoints like /login shouldn't trigger BOLA — they serve forms, not user data."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/login",
+            category=EndpointCategory.AUTH_ENDPOINT,
+        )
+        indicators = VulnPatternAnalyzer._check_bola_idor(ep)
+        assert not indicators
+
     def test_query_param_user_id(self):
         """Given endpoint with user_id query param, detect bola_idor."""
         ep = make_endpoint(
@@ -206,6 +215,17 @@ class TestAuthBoundary:
         )
         indicators = VulnPatternAnalyzer._check_auth_boundary(ep)
         assert any(ind.pattern == VulnPattern.AUTH_BOUNDARY_GAP for ind in indicators)
+
+    def test_token_endpoint_no_auth_gap(self):
+        """POST /token is an auth endpoint — being unauthenticated is expected."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/token",
+            method="POST",
+            requires_auth=False,
+            category=EndpointCategory.AUTH_ENDPOINT,
+        )
+        indicators = VulnPatternAnalyzer._check_auth_boundary(ep)
+        assert not indicators
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +797,15 @@ class TestInjectionSurfaces:
         indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
         assert not indicators
 
+    def test_ai_chat_endpoint_skips_injection(self):
+        """AI chat endpoints should not trigger command/SQL injection — prompt injection covers them."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/ai/chat",
+            parameters=["message", "query"],
+        )
+        indicators = VulnPatternAnalyzer._check_injection_surfaces(ep)
+        assert not indicators
+
 
 # ---------------------------------------------------------------------------
 # JWT detection from response headers/notes
@@ -1043,3 +1072,60 @@ class TestBodyAnalysisProcessing:
         # Pass 1 result is still intact
         assert len(scan_state.vuln_indicators[key]) == 1
         assert scan_state.vuln_indicators[key][0].description == "Pass 1 result"
+
+    def test_source_url_routes_to_correct_endpoint(self, scan_state: ScanState):
+        """Finding with source_url goes to the matching endpoint, not the first one."""
+        analyzer = self._make_analyzer()
+        ep_register = make_endpoint(url="https://target.com/register")
+        ep_console = make_endpoint(url="https://target.com/console")
+        scan_state.add_endpoint(ep_register)
+        scan_state.add_endpoint(ep_console)
+        key_register = scan_state.endpoint_key(ep_register.method, ep_register.url)
+        key_console = scan_state.endpoint_key(ep_console.method, ep_console.url)
+
+        response = ResponseBodyAnalysisResponse(
+            reasoning="Found secret in console",
+            findings=[
+                ResponseBodyFinding(
+                    finding_type="secret",
+                    value_redacted="s3cr...here",
+                    context="SECRET_KEY in Werkzeug console",
+                    source_url="https://target.com/console",
+                    confidence="critical",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [(key_register, ep_register), (key_console, ep_console)]
+        added = analyzer._process_body_analysis_results(scan_state, response, batch)
+
+        assert added == 1
+        assert key_console in scan_state.vuln_indicators
+        assert key_register not in scan_state.vuln_indicators
+
+    def test_no_source_url_multi_batch_drops_finding(self, scan_state: ScanState):
+        """Without source_url and multiple endpoints, finding is dropped (can't guess)."""
+        analyzer = self._make_analyzer()
+        ep1 = make_endpoint(url="https://target.com/page1")
+        ep2 = make_endpoint(url="https://target.com/page2")
+        scan_state.add_endpoint(ep1)
+        scan_state.add_endpoint(ep2)
+        key1 = scan_state.endpoint_key(ep1.method, ep1.url)
+        key2 = scan_state.endpoint_key(ep2.method, ep2.url)
+
+        response = ResponseBodyAnalysisResponse(
+            reasoning="Found something",
+            findings=[
+                ResponseBodyFinding(
+                    finding_type="secret",
+                    value_redacted="abcd...wxyz",
+                    context="Some secret",
+                    confidence="high",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [(key1, ep1), (key2, ep2)]
+        added = analyzer._process_body_analysis_results(scan_state, response, batch)
+
+        assert added == 0

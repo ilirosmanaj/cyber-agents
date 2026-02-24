@@ -41,9 +41,9 @@ class Settings(BaseSettings):
     proxy: str | None = None
 
     # crawler
-    max_crawl_depth: int = 5
-    max_pages: int = 200
-    max_js_files: int = 50
+    max_crawl_depth: int = 10
+    max_pages: int = 500
+    max_js_files: int = 100
 
     # confidence-gated re-analysis
     reanalysis_confidence_threshold: float = 0.6

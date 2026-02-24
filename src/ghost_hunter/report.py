@@ -12,6 +12,7 @@ from src.ghost_hunter.clients.llm import LLMClient
 from src.ghost_hunter.models import (
     AttackSurfaceEntry,
     Endpoint,
+    EndpointCategory,
     Finding,
     RiskLevel,
     ScanState,
@@ -627,6 +628,12 @@ _EXPECTED_BEHAVIOR_RULES: tuple[_ExpectedBehaviorRule, ...] = (
         reason="auth endpoints return tokens by design",
     ),
     _ExpectedBehaviorRule(
+        finding_types=("auth_boundary_gap", "vuln_auth_boundary_gap"),
+        path_keywords=("/login", "/auth", "/token", "/signin", "/oauth",
+                       "/register", "/signup"),
+        reason="auth endpoints are expected to be unauthenticated",
+    ),
+    _ExpectedBehaviorRule(
         finding_types=("info_disclosure", "vuln_info_disclosure"),
         path_keywords=("/swagger", "/api-docs", "/redoc", "/docs", "/openapi"),
         reason="documentation endpoints expose API specs by design",
@@ -640,6 +647,12 @@ _EXPECTED_BEHAVIOR_RULES: tuple[_ExpectedBehaviorRule, ...] = (
         finding_types=("mass_assignment", "vuln_mass_assignment"),
         path_keywords=("/register", "/signup", "/create-account"),
         reason="registration endpoints accept user-provided fields by design",
+    ),
+    _ExpectedBehaviorRule(
+        finding_types=("command_injection", "vuln_command_injection",
+                       "sql_injection", "vuln_sql_injection"),
+        path_keywords=("/ai/", "/chat", "/bot", "/assistant", "/llm", "/gpt"),
+        reason="AI endpoints accept free-text input — risk is prompt injection, not OS/SQL injection",
     ),
 )
 
@@ -698,8 +711,30 @@ def _is_response_denial(f: Finding, state: ScanState) -> bool:
     return any(phrase in snippet_lower for phrase in _DENIAL_PHRASES)
 
 
+# vuln patterns that don't apply to auth endpoints (login, register, token, etc.)
+_AUTH_ENDPOINT_FALSE_POSITIVE_TYPES = {
+    "auth_boundary_gap", "vuln_auth_boundary_gap",
+    "bola_idor", "vuln_bola_idor",
+    "command_injection", "vuln_command_injection",
+}
+
+
+def _is_category_mismatch(f: Finding, state: ScanState) -> bool:
+    """True if the finding type doesn't apply to the endpoint's category."""
+    ep = _lookup_endpoint_from_finding(f, state)
+    if ep is None:
+        return False
+    if ep.category == EndpointCategory.AUTH_ENDPOINT:
+        return f.finding_type in _AUTH_ENDPOINT_FALSE_POSITIVE_TYPES
+    return False
+
+
 def _is_false_positive(f: Finding, state: ScanState) -> bool:
-    return _is_expected_behavior(f) or _is_response_denial(f, state)
+    return (
+        _is_expected_behavior(f)
+        or _is_category_mismatch(f, state)
+        or _is_response_denial(f, state)
+    )
 
 
 def _confidence_summary(findings: list[Finding]) -> str:

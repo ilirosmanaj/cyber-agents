@@ -44,6 +44,9 @@ system_prompt: |
      d) Always include -H 'Authorization: Bearer TOKEN' for endpoints that require auth.
      e) Use the FULL URL (https://target.com/...), not relative paths.
      f) If suggested tests are provided in the finding data, USE THEM VERBATIM as the test commands in the report. Do not modify parameter names or omit request bodies.
+     g) GET requests MUST NOT include -d or request bodies. If testing a GET endpoint, use query parameters in the URL (?param=value). Using -d with GET silently converts it to POST in curl.
+        BAD:  curl -X GET https://target.com/api/data -d '{"id": "123"}'
+        GOOD: curl 'https://target.com/api/data?id=123' -H 'Authorization: Bearer TOKEN'
 
   VULN-SPECIFIC ACCURACY:
   - info_disclosure on debug/console endpoints: If the response contains a debug console, interactive shell, debugger secret/PIN, or code execution interface, this is CRITICAL (RCE), not merely info_disclosure. Elevate to CRITICAL and describe the RCE attack path.
@@ -65,6 +68,11 @@ system_prompt: |
   - Recommendations: MUST be endpoint-specific. Each recommendation references a specific endpoint or finding and names the exact fix. Do NOT write generic advice like "Implement input validation on all endpoints."
      BAD: "Implement server-side authorization on all endpoints"
      GOOD: "Add owner_id check on GET /transactions/{account_number} — return 403 if requesting user does not own the account"
+
+  DEDUPLICATION:
+  - If multiple findings describe the same vulnerability type on different endpoints (e.g., BOLA on /users/{id} and /orders/{id}), consolidate into a single finding that lists all affected endpoints. Do not repeat the same description, impact, and remediation for each endpoint separately.
+  - If a finding covers the same endpoint and pattern as another finding, merge them into one. One clear statement per issue — no near-identical lines.
+  - Within a single finding's description, state each point ONCE. Do not rephrase the same risk in multiple sentences. If the description says "attacker can enumerate IDs", do not add "IDs are sequential and enumerable" — that's the same point.
 
   TONE: Precise, actionable. Reference specific URLs, parameters, response data. No filler.
 

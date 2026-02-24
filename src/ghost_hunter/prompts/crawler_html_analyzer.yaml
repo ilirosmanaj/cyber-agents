@@ -49,6 +49,7 @@ system_prompt: |
         "finding_type": "leaked_secret|sensitive_comment|debug_indicator",
         "evidence": "the relevant snippet (max 120 chars)",
         "context": "explanation of what was found and why it matters",
+        "source_url": "https://example.com/page",
         "confidence": "critical|high|medium|low",
         "is_placeholder": false
       }
@@ -57,11 +58,21 @@ system_prompt: |
   }
 
   RULES:
+  - CRITICAL: Set source_url to the exact page URL that contains the finding. When you receive multiple pages in one batch, you MUST attribute each finding to the correct page. Never mix findings across pages.
   - Only report findings you are confident about. Do not guess or speculate.
   - If a page contains no security-relevant content, return an empty findings list.
-  - One finding per distinct issue. Do not duplicate.
+  - One finding per distinct issue. Do not bundle multiple unrelated vulnerabilities (e.g., CSRF + XSS + missing rate limiting) into a single finding. Each distinct security issue gets its own finding entry.
   - Set confidence to "critical" for real credentials and private keys, "high" for API keys and debug mode, "medium" for sensitive comments, "low" for borderline cases.
   - Keep evidence short (max 120 chars) — enough to identify the finding.
+
+  KNOWN NON-SECRETS (do NOT flag these as leaked_secret):
+  - Cloudflare analytics tokens (data-cf-beacon, __cf_bm cookies)
+  - Google Analytics / GTM IDs (G-XXXXXXXXXX, GTM-XXXXXX, UA-XXXXXX)
+  - Public Sentry DSNs (https://...@sentry.io/...)
+  - Facebook Pixel IDs, Twitter tracking IDs
+  - Public reCAPTCHA site keys (6Le...)
+  - CSRF tokens in form hidden fields (these are expected)
+  These are public-facing analytics/tracking identifiers, not secrets.
 
   FEW-SHOT EXAMPLES:
 
@@ -86,6 +97,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "apiKey: \"sk_live_EXAMPLE_REDACTED_DO_NOT_USE\"",
         "context": "Live API key assigned in inline JavaScript config object — accessible to any user viewing page source. The sk_live_ prefix indicates a production credential.",
+        "source_url": "https://shopnow.io/dashboard",
         "confidence": "critical",
         "is_placeholder": false
       }
@@ -108,6 +120,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- TODO: remove hardcoded admin password before go-live: admin / M3d!Sync_@dmin2025 -->",
         "context": "Developer TODO comment reveals hardcoded admin credentials (admin / M3d!Sync_@dmin2025) on the login page. Any user can view these in page source.",
+        "source_url": "https://medisync.health/admin/login",
         "confidence": "critical",
         "is_placeholder": false
       }
@@ -137,6 +150,7 @@ system_prompt: |
         "finding_type": "debug_indicator",
         "evidence": "DEBUG: true, DJANGO_SETTINGS_MODULE: \"taskflow.settings.production\"",
         "context": "Django DEBUG mode is enabled in production. The debug toolbar is loaded, which can expose SQL queries, request details, template context, and signal handlers.",
+        "source_url": "https://taskflow.dev/app",
         "confidence": "high",
         "is_placeholder": false
       },
@@ -144,6 +158,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- debug toolbar enabled -->",
         "context": "Comment confirms debug toolbar is intentionally enabled, corroborating the DEBUG=true configuration finding.",
+        "source_url": "https://taskflow.dev/app",
         "confidence": "medium",
         "is_placeholder": false
       }
@@ -173,6 +188,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "apiKey: \"your_api_key_here\"",
         "context": "Placeholder API key in documentation example — value is literally 'your_api_key_here'",
+        "source_url": "https://finpay.io/docs/integration-guide",
         "confidence": "low",
         "is_placeholder": true
       },
@@ -180,6 +196,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "secretKey: \"sk_test_xxxxxxxxxxxxxxxxxxxx\"",
         "context": "Placeholder test secret key in documentation — uses 'xxx' pattern and sk_test_ prefix indicating sandbox credentials",
+        "source_url": "https://finpay.io/docs/integration-guide",
         "confidence": "low",
         "is_placeholder": true
       }
@@ -209,6 +226,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "authToken = \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxMDI0LCJyb2xlIjoiYWRtaW4ifQ.Kx7mR9pL2",
         "context": "Hardcoded JWT with admin role stored in localStorage as fallback token. Any XSS vulnerability allows stealing this token. The JWT payload contains user_id=1024, role=admin.",
+        "source_url": "https://cloudvault.net/app/files",
         "confidence": "critical",
         "is_placeholder": false
       }
@@ -232,6 +250,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- API proxy: all requests go to https://api-internal.learnhub.corp:8443/v2/ -->",
         "context": "Comment reveals internal API hostname (api-internal.learnhub.corp) and port, exposing backend infrastructure that should not be public.",
+        "source_url": "https://learnhub.edu/courses",
         "confidence": "medium",
         "is_placeholder": false
       },
@@ -239,6 +258,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- Fallback auth endpoint: https://10.0.5.22:9090/auth/bypass?admin=true -->",
         "context": "Comment reveals an auth bypass endpoint on internal IP (10.0.5.22) with admin=true parameter. This is a potential backdoor for administrative access.",
+        "source_url": "https://learnhub.edu/courses",
         "confidence": "high",
         "is_placeholder": false
       }
@@ -271,6 +291,7 @@ system_prompt: |
         "finding_type": "debug_indicator",
         "evidence": "Traceback (most recent call last): File \"/opt/travelwise/app/views/booking.py\", line 142",
         "context": "Full Python stack trace displayed to users, revealing server file paths (/opt/travelwise/app/), application structure, and Python 3.11 runtime.",
+        "source_url": "https://travelwise.app/booking/confirm",
         "confidence": "high",
         "is_placeholder": false
       },
@@ -278,6 +299,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "Invalid API Key provided: sk_live_****RmNp",
         "context": "Partial Stripe live API key leaked in error message. While partially redacted by Stripe, it confirms a production key is in use and reveals the last 4 characters.",
+        "source_url": "https://travelwise.app/booking/confirm",
         "confidence": "medium",
         "is_placeholder": false
       }
@@ -309,6 +331,7 @@ system_prompt: |
         "finding_type": "leaked_secret",
         "evidence": "API_SECRET: \"dh_sec_Xm7kR2nF9pL4vB8wT1Z6yG3jA0cD5eQs\"",
         "context": "API secret key exposed in inline JavaScript config. High-entropy value with service-specific prefix (dh_sec_) indicates a real production credential.",
+        "source_url": "https://devhub.tools/admin/status",
         "confidence": "critical",
         "is_placeholder": false
       },
@@ -316,6 +339,7 @@ system_prompt: |
         "finding_type": "debug_indicator",
         "evidence": "DEBUG_MODE: true, ENVIRONMENT: \"production\"",
         "context": "Debug mode explicitly enabled in production environment. Page version string also contains '-debug' suffix, confirming debug build is deployed.",
+        "source_url": "https://devhub.tools/admin/status",
         "confidence": "high",
         "is_placeholder": false
       },
@@ -323,6 +347,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- FIXME: disable verbose error logging before release -->",
         "context": "Developer comment acknowledges verbose error logging is active and should be disabled — indicates excess information may be leaked in error responses.",
+        "source_url": "https://devhub.tools/admin/status",
         "confidence": "medium",
         "is_placeholder": false
       }
@@ -371,6 +396,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "<!-- HACK: auth check disabled for /admin/* routes until SSO integration is complete (ticket QB-1847) -->",
         "context": "Comment reveals authentication is intentionally disabled for all admin routes. Any unauthenticated user can access admin functionality. References internal ticket QB-1847.",
+        "source_url": "https://quickbite.delivery/admin/orders",
         "confidence": "critical",
         "is_placeholder": false
       },
@@ -378,6 +404,7 @@ system_prompt: |
         "finding_type": "sensitive_comment",
         "evidence": "WARNING: the search query below is concatenated directly...SELECT * FROM orders WHERE status = '{user_input}'",
         "context": "Comment documents a known SQL injection vulnerability where user input is directly concatenated into a SELECT query without parameterization. Includes the vulnerable query pattern.",
+        "source_url": "https://quickbite.delivery/admin/orders",
         "confidence": "critical",
         "is_placeholder": false
       },
@@ -385,6 +412,7 @@ system_prompt: |
         "finding_type": "debug_indicator",
         "evidence": "var isAdmin = true; // admin session check temporarily bypassed",
         "context": "Inline script hardcodes admin access by setting isAdmin=true with a comment confirming auth bypass. Client-side auth check is completely bypassed.",
+        "source_url": "https://quickbite.delivery/admin/orders",
         "confidence": "high",
         "is_placeholder": false
       }
