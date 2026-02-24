@@ -12,6 +12,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 
 import click
 
@@ -60,8 +61,9 @@ async def _run_scan(target: str, rate_limit: float | None, proxy: str | None) ->
 
     state = ScanState(target=display, base_url=base_url)
 
+    timestamp = datetime.now(tz=timezone.utc).strftime("%d%m%Y-%H:%M")
     create_trace(
-        name=f"ghost_hunter_scan_{state.scan_id}",
+        name=f"{display}_{timestamp}",
         session_id=state.scan_id,
         metadata={"target": display, "base_url": base_url},
     )

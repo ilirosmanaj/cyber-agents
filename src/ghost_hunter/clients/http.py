@@ -9,7 +9,6 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from aiolimiter import AsyncLimiter
 
-from src.ghost_hunter.clients.tracing import trace_span
 from src.ghost_hunter.config import settings
 
 logger = logging.getLogger(__name__)
@@ -74,16 +73,12 @@ class AdaptiveHttpClient:
             await self._limiter.acquire()
 
             try:
-                with trace_span(
-                    "http_request",
-                    metadata={"method": method, "url": full_url, "attempt": attempt},
-                ):
-                    resp = await self._client.request(
-                        method,
-                        full_url,
-                        follow_redirects=follow_redirects,
-                        **kwargs,
-                    )
+                resp = await self._client.request(
+                    method,
+                    full_url,
+                    follow_redirects=follow_redirects,
+                    **kwargs,
+                )
 
                 if resp.status_code == 429:
                     retry_after = float(resp.headers.get("Retry-After", "2"))
