@@ -62,3 +62,332 @@ system_prompt: |
   - One finding per distinct issue. Do not duplicate.
   - Set confidence to "critical" for real credentials and private keys, "high" for API keys and debug mode, "medium" for sensitive comments, "low" for borderline cases.
   - Keep evidence short (max 120 chars) — enough to identify the finding.
+
+  FEW-SHOT EXAMPLES:
+
+  Example 1 — API key in inline JavaScript variable assignment:
+  Input:
+    URL: https://shopnow.io/dashboard
+    HTML comments: (none)
+    Inline scripts:
+      <script>
+        var SHOPNOW_CONFIG = {
+          apiKey: "sk_live_EXAMPLE_REDACTED_DO_NOT_USE",
+          environment: "production",
+          region: "us-east-1"
+        };
+      </script>
+    Body snippet: <div id="app">Loading dashboard...</div>
+  Good output:
+  {
+    "reasoning": "Inline JavaScript on the dashboard page assigns a live API key (sk_live_ prefix) to a global config object. This is a production secret exposed to any visitor.",
+    "findings": [
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "apiKey: \"sk_live_EXAMPLE_REDACTED_DO_NOT_USE\"",
+        "context": "Live API key assigned in inline JavaScript config object — accessible to any user viewing page source. The sk_live_ prefix indicates a production credential.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 2 — HTML comment with TODO about removing hardcoded password:
+  Input:
+    URL: https://medisync.health/admin/login
+    HTML comments:
+      <!-- TODO: remove hardcoded admin password before go-live: admin / M3d!Sync_@dmin2025 -->
+    Inline scripts: (none)
+    Body snippet: <form action="/admin/auth" method="POST"><input name="username"><input name="password" type="password"><button>Login</button></form>
+  Good output:
+  {
+    "reasoning": "An HTML comment on the admin login page contains a TODO note with a hardcoded admin username and password in plaintext. This is a critical credential leak visible in page source.",
+    "findings": [
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- TODO: remove hardcoded admin password before go-live: admin / M3d!Sync_@dmin2025 -->",
+        "context": "Developer TODO comment reveals hardcoded admin credentials (admin / M3d!Sync_@dmin2025) on the login page. Any user can view these in page source.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 3 — Django/Flask DEBUG=True in inline config:
+  Input:
+    URL: https://taskflow.dev/app
+    HTML comments:
+      <!-- debug toolbar enabled -->
+    Inline scripts:
+      <script>
+        window.__APP_CONFIG__ = {
+          DEBUG: true,
+          DJANGO_SETTINGS_MODULE: "taskflow.settings.production",
+          ALLOWED_HOSTS: ["taskflow.dev", "*.taskflow.internal"]
+        };
+      </script>
+    Body snippet: <div id="djDebug" style="display:none;"><div class="djdt-panelContent"><pre>Django Version: 4.2.7</pre></div></div>
+  Good output:
+  {
+    "reasoning": "Page has Django debug toolbar markup, an HTML comment confirming debug is enabled, and inline config showing DEBUG=true alongside the production settings module. This exposes internal hostnames and framework details.",
+    "findings": [
+      {
+        "finding_type": "debug_indicator",
+        "evidence": "DEBUG: true, DJANGO_SETTINGS_MODULE: \"taskflow.settings.production\"",
+        "context": "Django DEBUG mode is enabled in production. The debug toolbar is loaded, which can expose SQL queries, request details, template context, and signal handlers.",
+        "confidence": "high",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- debug toolbar enabled -->",
+        "context": "Comment confirms debug toolbar is intentionally enabled, corroborating the DEBUG=true configuration finding.",
+        "confidence": "medium",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.92
+  }
+
+  Example 4 — Placeholder API key in documentation page (is_placeholder=true):
+  Input:
+    URL: https://finpay.io/docs/integration-guide
+    HTML comments: (none)
+    Inline scripts:
+      <script>
+        // Example: Initialize the FinPay SDK
+        var finpay = new FinPay({
+          apiKey: "your_api_key_here",
+          secretKey: "sk_test_xxxxxxxxxxxxxxxxxxxx",
+          sandbox: true
+        });
+      </script>
+    Body snippet: <h1>Integration Guide</h1><p>Follow the steps below to integrate FinPay into your application. Replace the placeholder values with your actual credentials from the dashboard.</p>
+  Good output:
+  {
+    "reasoning": "Documentation page showing example SDK initialization code. Both the apiKey ('your_api_key_here') and secretKey ('sk_test_xxxxxxxxxxxxxxxxxxxx') are clearly placeholder values used for illustration purposes.",
+    "findings": [
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "apiKey: \"your_api_key_here\"",
+        "context": "Placeholder API key in documentation example — value is literally 'your_api_key_here'",
+        "confidence": "low",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "secretKey: \"sk_test_xxxxxxxxxxxxxxxxxxxx\"",
+        "context": "Placeholder test secret key in documentation — uses 'xxx' pattern and sk_test_ prefix indicating sandbox credentials",
+        "confidence": "low",
+        "is_placeholder": true
+      }
+    ],
+    "confidence": 0.9
+  }
+
+  Example 5 — Auth token stored in localStorage (XSS risk):
+  Input:
+    URL: https://cloudvault.net/app/files
+    HTML comments: (none)
+    Inline scripts:
+      <script>
+        var authToken = localStorage.getItem('cv_auth_token');
+        if (!authToken) {
+          authToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxMDI0LCJyb2xlIjoiYWRtaW4ifQ.Kx7mR9pL2vB8nT4wZ1y";
+          localStorage.setItem('cv_auth_token', authToken);
+        }
+        fetch('/api/files', { headers: { 'Authorization': 'Bearer ' + authToken }});
+      </script>
+    Body snippet: <div class="file-manager"><h2>Your Files</h2></div>
+  Good output:
+  {
+    "reasoning": "Inline script contains a hardcoded fallback JWT token with admin role that gets stored in localStorage. This is both a leaked credential and an XSS risk since localStorage is accessible to any script on the page.",
+    "findings": [
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "authToken = \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxMDI0LCJyb2xlIjoiYWRtaW4ifQ.Kx7mR9pL2",
+        "context": "Hardcoded JWT with admin role stored in localStorage as fallback token. Any XSS vulnerability allows stealing this token. The JWT payload contains user_id=1024, role=admin.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 6 — HTML comment mentioning internal API endpoint:
+  Input:
+    URL: https://learnhub.edu/courses
+    HTML comments:
+      <!-- API proxy: all requests go to https://api-internal.learnhub.corp:8443/v2/ -->
+      <!-- Fallback auth endpoint: https://10.0.5.22:9090/auth/bypass?admin=true -->
+    Inline scripts: (none)
+    Body snippet: <div class="course-catalog"><h1>Available Courses</h1><ul><li>Introduction to Python</li></ul></div>
+  Good output:
+  {
+    "reasoning": "Two HTML comments reveal internal infrastructure details: an internal API proxy host (api-internal.learnhub.corp:8443) and a fallback auth bypass endpoint on a private IP address with an admin=true parameter.",
+    "findings": [
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- API proxy: all requests go to https://api-internal.learnhub.corp:8443/v2/ -->",
+        "context": "Comment reveals internal API hostname (api-internal.learnhub.corp) and port, exposing backend infrastructure that should not be public.",
+        "confidence": "medium",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- Fallback auth endpoint: https://10.0.5.22:9090/auth/bypass?admin=true -->",
+        "context": "Comment reveals an auth bypass endpoint on internal IP (10.0.5.22) with admin=true parameter. This is a potential backdoor for administrative access.",
+        "confidence": "high",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.93
+  }
+
+  Example 7 — Stack trace in inline error output:
+  Input:
+    URL: https://travelwise.app/booking/confirm
+    HTML comments: (none)
+    Inline scripts: (none)
+    Body snippet:
+      <div class="error-container">
+        <h2>Something went wrong</h2>
+        <pre class="traceback">
+        Traceback (most recent call last):
+          File "/opt/travelwise/app/views/booking.py", line 142, in confirm_booking
+            payment = stripe.Charge.create(amount=total, source=token)
+          File "/opt/travelwise/venv/lib/python3.11/site-packages/stripe/api_resources/charge.py", line 37, in create
+            raise stripe.error.AuthenticationError("Invalid API Key provided: sk_live_****RmNp")
+        stripe.error.AuthenticationError: Invalid API Key provided: sk_live_****RmNp
+        </pre>
+      </div>
+  Good output:
+  {
+    "reasoning": "An unhandled Python stack trace is displayed on the booking confirmation page. It reveals the application's file structure, Python version, and a partial Stripe live API key from the authentication error.",
+    "findings": [
+      {
+        "finding_type": "debug_indicator",
+        "evidence": "Traceback (most recent call last): File \"/opt/travelwise/app/views/booking.py\", line 142",
+        "context": "Full Python stack trace displayed to users, revealing server file paths (/opt/travelwise/app/), application structure, and Python 3.11 runtime.",
+        "confidence": "high",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "Invalid API Key provided: sk_live_****RmNp",
+        "context": "Partial Stripe live API key leaked in error message. While partially redacted by Stripe, it confirms a production key is in use and reveals the last 4 characters.",
+        "confidence": "medium",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.93
+  }
+
+  Example 8 — Multiple findings on same page (secret + debug indicator):
+  Input:
+    URL: https://devhub.tools/admin/status
+    HTML comments:
+      <!-- FIXME: disable verbose error logging before release -->
+    Inline scripts:
+      <script>
+        window.DEVHUB_ENV = {
+          API_SECRET: "dh_sec_Xm7kR2nF9pL4vB8wT1Z6yG3jA0cD5eQs",
+          ENVIRONMENT: "production",
+          DEBUG_MODE: true,
+          SENTRY_DSN: "https://abc123@o456.ingest.sentry.io/789",
+          BUILD_HASH: "a3f7c2e"
+        };
+      </script>
+    Body snippet: <div class="admin-panel"><h1>System Status</h1><p>Version: 2.4.1-debug</p><p>Uptime: 47 days</p></div>
+  Good output:
+  {
+    "reasoning": "Admin status page has multiple security issues: an API secret in inline JavaScript, debug mode enabled in production, a Sentry DSN that could be abused for log injection, and a developer comment about verbose error logging.",
+    "findings": [
+      {
+        "finding_type": "leaked_secret",
+        "evidence": "API_SECRET: \"dh_sec_Xm7kR2nF9pL4vB8wT1Z6yG3jA0cD5eQs\"",
+        "context": "API secret key exposed in inline JavaScript config. High-entropy value with service-specific prefix (dh_sec_) indicates a real production credential.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "debug_indicator",
+        "evidence": "DEBUG_MODE: true, ENVIRONMENT: \"production\"",
+        "context": "Debug mode explicitly enabled in production environment. Page version string also contains '-debug' suffix, confirming debug build is deployed.",
+        "confidence": "high",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- FIXME: disable verbose error logging before release -->",
+        "context": "Developer comment acknowledges verbose error logging is active and should be disabled — indicates excess information may be leaked in error responses.",
+        "confidence": "medium",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.94
+  }
+
+  Example 9 — Clean page with no findings:
+  Input:
+    URL: https://streamline.ai/pricing
+    HTML comments:
+      <!-- Google Tag Manager -->
+      <!-- End Google Tag Manager -->
+    Inline scripts:
+      <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+        gtag('config', 'G-XXXXXXXXXX');
+      </script>
+    Body snippet: <div class="pricing-page"><h1>Simple, transparent pricing</h1><div class="plan"><h2>Starter</h2><p>$9/mo</p></div><div class="plan"><h2>Pro</h2><p>$29/mo</p></div></div>
+  Good output:
+  {
+    "reasoning": "Standard marketing pricing page with only Google Tag Manager boilerplate. The GTM comments are standard third-party analytics integration. The GA config ID 'G-XXXXXXXXXX' is a placeholder in the template but this is a public analytics ID, not a secret. No security-relevant content found.",
+    "findings": [],
+    "confidence": 0.95
+  }
+
+  Example 10 — Comment revealing SQL injection workaround / auth bypass:
+  Input:
+    URL: https://quickbite.delivery/admin/orders
+    HTML comments:
+      <!-- HACK: auth check disabled for /admin/* routes until SSO integration is complete (ticket QB-1847) -->
+      <!-- WARNING: the search query below is concatenated directly because parameterized queries broke pagination. DO NOT expose this endpoint publicly. See: SELECT * FROM orders WHERE status = '{user_input}' -->
+    Inline scripts:
+      <script>
+        // admin session check temporarily bypassed
+        var isAdmin = true;
+      </script>
+    Body snippet: <div class="admin-orders"><h1>Order Management</h1><table><tr><th>Order ID</th><th>Status</th></tr></table></div>
+  Good output:
+  {
+    "reasoning": "HTML comments on the admin orders page reveal two critical security issues: authentication has been intentionally disabled for all admin routes, and a search query uses direct string concatenation instead of parameterized queries, creating a SQL injection vulnerability. The inline script also hardcodes admin access.",
+    "findings": [
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "<!-- HACK: auth check disabled for /admin/* routes until SSO integration is complete (ticket QB-1847) -->",
+        "context": "Comment reveals authentication is intentionally disabled for all admin routes. Any unauthenticated user can access admin functionality. References internal ticket QB-1847.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "sensitive_comment",
+        "evidence": "WARNING: the search query below is concatenated directly...SELECT * FROM orders WHERE status = '{user_input}'",
+        "context": "Comment documents a known SQL injection vulnerability where user input is directly concatenated into a SELECT query without parameterization. Includes the vulnerable query pattern.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "debug_indicator",
+        "evidence": "var isAdmin = true; // admin session check temporarily bypassed",
+        "context": "Inline script hardcodes admin access by setting isAdmin=true with a comment confirming auth bypass. Client-side auth check is completely bypassed.",
+        "confidence": "high",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }

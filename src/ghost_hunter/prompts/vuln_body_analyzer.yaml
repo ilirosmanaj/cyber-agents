@@ -49,3 +49,361 @@ system_prompt: |
   - One finding per distinct secret/credential. Do not duplicate.
   - Use finding_type "credential" for database URLs with passwords, "secret" for API keys and secret assignments, "config_leak" for sensitive configuration values, "debug_info" for debug console output with secrets.
   - Set confidence to "critical" for production credentials and private keys, "high" for API keys and database URLs, "medium" for config values that may or may not be sensitive.
+
+  FEW-SHOT EXAMPLES:
+
+  Example 1 — Werkzeug/Flask debug console with SECRET_KEY:
+  Input:
+    --- GET https://medisync.health/console ---
+    Status: 200
+    Response body:
+    <html><title>Werkzeug Debugger</title>
+    <div class="debugger">
+    <h1>Interactive Console</h1>
+    <p>SECRET_KEY = "fG7k!mR2pL9qX4vB8nT1wZ6yH3jA0cD5eS"</p>
+    <p>DEBUG = True</p>
+    <p>APP_ENV = "production"</p>
+    </div>
+  Good output:
+  {
+    "reasoning": "Werkzeug debug console is active on a production health platform, exposing the Flask SECRET_KEY used for signing session cookies and CSRF tokens. Debug mode is enabled in production.",
+    "findings": [
+      {
+        "finding_type": "debug_info",
+        "value_redacted": "fG7k...cD5eS",
+        "context": "SECRET_KEY assignment exposed in Werkzeug debug console — this is the Flask signing key used for session cookies and CSRF tokens. Attacker can forge sessions.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "config_leak",
+        "value_redacted": "True",
+        "context": "DEBUG flag set to True in production environment, enabling interactive debugger with code execution capability.",
+        "confidence": "high",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 2 — Database URL with credentials in a config dump:
+  Input:
+    --- GET https://shopnow.io/admin/settings.json ---
+    Status: 200
+    Response body:
+    {"database": {"primary": "postgres://shopnow_admin:Xt9!bK3mWq7zR1pL@db-prod-1.shopnow.internal:5432/shopnow_production", "replica": "postgres://shopnow_reader:Yp2$cN8vFj4hD6gA@db-replica.shopnow.internal:5432/shopnow_production"}, "cache_ttl": 300, "log_level": "info"}
+  Good output:
+  {
+    "reasoning": "Admin settings endpoint exposes database connection strings with embedded credentials for both primary and replica PostgreSQL databases on internal hosts.",
+    "findings": [
+      {
+        "finding_type": "credential",
+        "value_redacted": "post...tion",
+        "context": "Primary DATABASE_URL with admin credentials (shopnow_admin) to internal PostgreSQL host db-prod-1.shopnow.internal. Provides full read/write database access.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "credential",
+        "value_redacted": "post...tion",
+        "context": "Replica DATABASE_URL with reader credentials (shopnow_reader) to internal PostgreSQL replica. Provides read access to production data.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 3 — Placeholder/documentation values (is_placeholder=true):
+  Input:
+    --- GET https://taskflow.dev/docs/getting-started ---
+    Status: 200
+    Response body:
+    <h2>Quick Start Guide</h2>
+    <p>Copy the following into your .env file and replace the placeholder values:</p>
+    <pre>
+    TASKFLOW_API_KEY=your_key_here
+    SECRET_KEY=changeme
+    DATABASE_URL=postgres://user:password@localhost:5432/taskflow_dev
+    REDIS_URL=redis://localhost:6379/0
+    </pre>
+    <p>Make sure to replace all placeholder values before deploying.</p>
+  Good output:
+  {
+    "reasoning": "Documentation page showing setup instructions with clearly marked placeholder values. All credentials use generic defaults (changeme, your_key_here, localhost) and the page explicitly instructs users to replace them.",
+    "findings": [
+      {
+        "finding_type": "secret",
+        "value_redacted": "your...here",
+        "context": "TASKFLOW_API_KEY placeholder in documentation — value is literally 'your_key_here'",
+        "confidence": "medium",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "cha...eme",
+        "context": "SECRET_KEY placeholder 'changeme' in getting-started documentation",
+        "confidence": "medium",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "credential",
+        "value_redacted": "post..._dev",
+        "context": "DATABASE_URL with generic localhost credentials in documentation example",
+        "confidence": "medium",
+        "is_placeholder": true
+      }
+    ],
+    "confidence": 0.9
+  }
+
+  Example 4 — Clean JSON API response (no findings):
+  Input:
+    --- GET https://finpay.io/api/v2/transactions?page=1 ---
+    Status: 200
+    Response body:
+    {"transactions": [{"id": "txn_8f3a2b1c", "amount": 49.99, "currency": "USD", "status": "completed", "created_at": "2025-11-15T10:30:00Z"}, {"id": "txn_7e4d3c2b", "amount": 125.00, "currency": "EUR", "status": "pending", "created_at": "2025-11-15T09:15:00Z"}], "meta": {"page": 1, "total_pages": 12}}
+  Good output:
+  {
+    "reasoning": "Standard paginated JSON API response listing financial transactions. Contains only business data (transaction IDs, amounts, statuses). No secrets, credentials, or sensitive configuration values present.",
+    "findings": [],
+    "confidence": 0.95
+  }
+
+  Example 5 — Non-standard API keys in config endpoint (Stripe, SendGrid, etc.):
+  Input:
+    --- GET https://cloudvault.net/internal/service-config ---
+    Status: 200
+    Response body:
+    {"stripe_webhook_secret": "whsec_7Kp3mR9xL2vB8nT4wZ1yH6jA0cD5eQfG", "sendgrid_api_key": "SG.nR4kL8mWpQ2.7Kp3mR9xL2vB8nT4wZ1yH6jA0cD5eQfG", "twilio_auth_token": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "app_env": "production", "log_level": "warn"}
+  Good output:
+  {
+    "reasoning": "Internal service config endpoint exposes production API keys for Stripe webhooks, SendGrid email, and Twilio SMS services.",
+    "findings": [
+      {
+        "finding_type": "secret",
+        "value_redacted": "whse...QfG",
+        "context": "Stripe webhook signing secret exposed — allows attacker to forge Stripe webhook events and manipulate payment flows.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "SG.n...QfG",
+        "context": "SendGrid API key exposed — allows sending emails as the application, potential phishing vector.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "a1b2...c5d6",
+        "context": "Twilio auth token exposed — allows sending SMS and making calls via the application's Twilio account.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 6 — PEM-encoded private key in response:
+  Input:
+    --- GET https://learnhub.edu/api/debug/certificates ---
+    Status: 200
+    Response body:
+    {"service": "learnhub-auth", "tls_private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA2mX3oF7Gq1R8kPwV5NzT9lYhJKeFqX4bD\ncH7gM2nRvW0jA5xS6yBtIUmLoKd3pZ8fN1qE9hR4wC7oXkGiJ\nvLmS2dF5aY3xT9hQbN0pZ7rKjE1cWgM4fL8vR5nOqD6tX2sYbH\n1iA3kP9jF7mW4gT8lQ5vN0cR2xS6yB3eK9hD1oZ4wM7fL8aG0p\nJ5nT2mX6qV9rY3sW7cF4bD1gH8kL2jA0eR5vN3xS9yBtIKoMfC\n-----END RSA PRIVATE KEY-----", "certificate": "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAJC1HiIAZAiU...\n-----END CERTIFICATE-----"}
+  Good output:
+  {
+    "reasoning": "Debug certificates endpoint exposes a PEM-encoded RSA private key alongside its certificate. This is the TLS private key for the learnhub-auth service.",
+    "findings": [
+      {
+        "finding_type": "secret",
+        "value_redacted": "-----BEGIN RSA PRI...ATE KEY-----",
+        "context": "RSA private key for the learnhub-auth TLS service exposed via debug endpoint. Attacker can impersonate the service or decrypt captured TLS traffic.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 7 — AWS credentials in environment dump:
+  Input:
+    --- GET https://travelwise.app/debug/env ---
+    Status: 200
+    Response body:
+    HOSTNAME=ip-10-0-3-47
+    AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+    AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYzExAmPlEkEy
+    AWS_DEFAULT_REGION=us-east-1
+    S3_BUCKET=travelwise-prod-uploads
+    NODE_ENV=production
+    PORT=3000
+    LOG_LEVEL=debug
+  Good output:
+  {
+    "reasoning": "Environment variable dump from a debug endpoint exposes AWS credentials including access key ID and secret access key, along with the production S3 bucket name and internal hostname.",
+    "findings": [
+      {
+        "finding_type": "credential",
+        "value_redacted": "AKIA...MPLE",
+        "context": "AWS_ACCESS_KEY_ID exposed in environment dump. Combined with the secret key, provides programmatic access to AWS services.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "credential",
+        "value_redacted": "wJal...EkEy",
+        "context": "AWS_SECRET_ACCESS_KEY exposed in environment dump. Paired with the access key ID, grants full access to the AWS account's permitted resources.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "config_leak",
+        "value_redacted": "trav...oads",
+        "context": "Production S3 bucket name (travelwise-prod-uploads) and internal hostname (ip-10-0-3-47) revealed — aids further enumeration.",
+        "confidence": "medium",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 8 — Redis/MongoDB connection strings with passwords:
+  Input:
+    --- GET https://devhub.tools/actuator/configprops ---
+    Status: 200
+    Response body:
+    {"contexts": {"application": {"beans": {"dataSourceProperties": {"properties": {"url": "jdbc:mysql://db.devhub.internal:3306/devhub_prod"}}, "redisProperties": {"properties": {"url": "redis://:R3d!sP@ssw0rd_Pr0d@cache.devhub.internal:6379/0"}}, "mongoProperties": {"properties": {"uri": "mongodb://devhub_svc:M0ng0_s3cret!2025@mongo-cluster.devhub.internal:27017/devhub?authSource=admin"}}}}}}
+  Good output:
+  {
+    "reasoning": "Spring Boot actuator configprops endpoint exposes connection strings for Redis and MongoDB with embedded passwords, plus a MySQL JDBC URL revealing the internal database host.",
+    "findings": [
+      {
+        "finding_type": "credential",
+        "value_redacted": "redi.../0",
+        "context": "Redis connection URL with embedded password (R3d!sP@ssw0rd_Pr0d) to internal cache host cache.devhub.internal. Allows direct cache access and potential session hijacking.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "credential",
+        "value_redacted": "mong...dmin",
+        "context": "MongoDB connection URI with service account credentials (devhub_svc / M0ng0_s3cret!2025) to internal cluster. Grants authenticated access to production database.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "config_leak",
+        "value_redacted": "jdbc...prod",
+        "context": "MySQL JDBC URL reveals internal database hostname (db.devhub.internal) and production database name, useful for further attack planning.",
+        "confidence": "medium",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 9 — Spring Boot actuator /env endpoint leaking config:
+  Input:
+    --- GET https://streamline.ai/actuator/env ---
+    Status: 200
+    Response body:
+    {"activeProfiles": ["production"], "propertySources": [{"name": "systemEnvironment", "properties": {"OPENAI_API_KEY": {"value": "sk-proj-Xy7mN3pQ9rL2vB8kT4wZ1aH6jC0dF5eG"}, "JWT_SECRET": {"value": "hM7kR2nF9pL4vB8xT1wZ6yG3jA0cD5eQsWbNtIoUa"}, "SMTP_PASSWORD": {"value": "xoauth2-gK3mR7pL9vB2nT4wZ8yH1jA"}, "spring.datasource.password": {"value": "******"}}}]}
+  Good output:
+  {
+    "reasoning": "Spring Boot actuator /env endpoint exposes environment properties including an OpenAI API key, JWT signing secret, and SMTP credentials. The datasource password is redacted by Spring but other secrets are fully visible.",
+    "findings": [
+      {
+        "finding_type": "secret",
+        "value_redacted": "sk-p...5eG",
+        "context": "OpenAI API key (sk-proj-...) exposed via Spring actuator /env — allows making API calls charged to the application's OpenAI account.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "hM7k...oUa",
+        "context": "JWT_SECRET exposed — attacker can forge authentication tokens and impersonate any user in the application.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "credential",
+        "value_redacted": "xoau...1jA",
+        "context": "SMTP_PASSWORD exposed — allows sending emails via the application's mail server, potential for phishing or spam.",
+        "confidence": "high",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.95
+  }
+
+  Example 10 — Mixed response: some real secrets + some placeholder values together:
+  Input:
+    --- GET https://quickbite.delivery/api/debug/config ---
+    Status: 200
+    Response body:
+    {
+      "payment_gateway": {
+        "stripe_secret_key": "sk_live_EXAMPLE_REDACTED_DO_NOT_USE",
+        "paypal_client_secret": "REPLACE_ME_WITH_PAYPAL_SECRET"
+      },
+      "maps": {
+        "google_maps_api_key": "AIzaSyD-example-placeholder-key-12345",
+        "mapbox_token": "pk.eyJ1IjoicXVpY2tiaXRlIiwiYSI6ImNsZTRtN3BrdjAxMnkzb3F0Zm5menJocngifQ.7Kp3mR9"
+      },
+      "notifications": {
+        "firebase_server_key": "AAAA-BBBB-your_key_here",
+        "twilio_auth_token": "b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4"
+      },
+      "app_env": "staging"
+    }
+  Good output:
+  {
+    "reasoning": "Debug config endpoint contains a mix of real production secrets and unfilled placeholder values. Stripe live secret key, Mapbox token, and Twilio auth token appear to be real credentials. PayPal secret, Google Maps key, and Firebase key are clearly placeholder values that haven't been replaced yet.",
+    "findings": [
+      {
+        "finding_type": "secret",
+        "value_redacted": "sk_l...USE",
+        "context": "Stripe live secret key exposed — this is a production key (sk_live_ prefix) that allows creating charges and accessing the full Stripe API.",
+        "confidence": "critical",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "REPL...CRET",
+        "context": "PayPal client secret placeholder — value is literally 'REPLACE_ME_WITH_PAYPAL_SECRET', not a real credential.",
+        "confidence": "medium",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "AIza...2345",
+        "context": "Google Maps API key placeholder — contains 'example-placeholder' in the value, not a real key.",
+        "confidence": "medium",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "pk.e...R9",
+        "context": "Mapbox public token exposed — while public tokens have limited risk, this confirms the application uses Mapbox and reveals the account.",
+        "confidence": "high",
+        "is_placeholder": false
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "AAAA...here",
+        "context": "Firebase server key placeholder — value contains 'your_key_here', not a real credential.",
+        "confidence": "medium",
+        "is_placeholder": true
+      },
+      {
+        "finding_type": "secret",
+        "value_redacted": "b9c8...d5e4",
+        "context": "Twilio auth token exposed — high-entropy hex value allows sending SMS and making calls via the application's Twilio account.",
+        "confidence": "critical",
+        "is_placeholder": false
+      }
+    ],
+    "confidence": 0.92
+  }

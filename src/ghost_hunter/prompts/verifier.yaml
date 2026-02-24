@@ -83,3 +83,97 @@ system_prompt: |
     "target_agent": "classifier",
     "reason": "Classified as rest_api but /internal/metrics with system stats looks like a debug_endpoint — reclassification may trigger additional vuln patterns"
   }
+
+  Example 4 — Confidence upgrade (IDOR on sensitive financial data):
+  Given indicators:
+    - bola_idor MEDIUM on GET /api/v1/accounts/{id}/transactions (sequential integer IDs, no ownership check)
+    - Response body contains account_balance, routing_number, last_four_ssn
+  Good action:
+  {
+    "endpoint_key": "GET https://payments.finserv.io/api/v1/accounts/{id}/transactions",
+    "action": "adjust_confidence",
+    "pattern": "bola_idor",
+    "new_confidence": "critical",
+    "reason": "IDOR with sequential IDs exposing financial PII (routing numbers, partial SSN, balances) — impact warrants critical, not medium"
+  }
+
+  Example 5 — Suppression (auth_boundary_gap on intentionally public endpoint):
+  Given indicators:
+    - auth_boundary_gap HIGH on GET /api/v2/catalog/products
+    - Endpoint returns public product listings, no user-specific data
+    - Other /api/v2/ endpoints require Bearer token
+  Good action:
+  {
+    "endpoint_key": "GET https://shop.retailco.com/api/v2/catalog/products",
+    "action": "suppress",
+    "pattern": "auth_boundary_gap",
+    "new_confidence": "info",
+    "reason": "Product catalog is intentionally unauthenticated — no user-specific data returned. Auth gap is by design for public storefront browsing."
+  }
+
+  Example 6 — Cross-cutting note (consistent missing auth across API):
+  Given indicators:
+    - auth_boundary_gap on GET /api/v3/users/{id}
+    - auth_boundary_gap on PUT /api/v3/users/{id}/profile
+    - auth_boundary_gap on DELETE /api/v3/users/{id}/sessions
+    - No Authorization header observed on any /api/v3/ request
+  Good response (partial):
+  {
+    "reasoning": "Three separate auth_boundary_gap findings on /api/v3/ endpoints all stem from the same root cause: the v3 API namespace appears to lack an authentication middleware entirely. This is a single architectural gap, not three independent vulnerabilities.",
+    "cross_cutting_notes": ["All /api/v3/ endpoints lack authentication — likely a missing auth middleware at the router level rather than per-endpoint oversights. Consolidate into a single critical finding referencing the namespace."],
+    "confidence": 0.90
+  }
+
+  Example 7 — Duplicate SSRF findings from different detection passes:
+  Given indicators:
+    - ssrf HIGH on POST /api/integrations/webhook (from vuln_analyzer: url parameter accepts internal IPs)
+    - ssrf HIGH on POST /api/integrations/webhook (from pattern matching: url param with no allowlist)
+    - ssrf MEDIUM on POST /api/integrations/callback (from vuln_analyzer: callback_url parameter)
+  Good action:
+  {
+    "endpoint_key": "POST https://connect.saasplatform.dev/api/integrations/webhook",
+    "action": "annotate",
+    "pattern": "ssrf",
+    "new_confidence": "high",
+    "reason": "Two independent detections (LLM vuln analysis and pattern matching) both flagged SSRF on the same endpoint/parameter — high confidence, deduplicate into one finding. The /callback endpoint is a separate finding with its own parameter."
+  }
+
+  Example 8 — Reanalysis (endpoint classified wrong affects vuln detection):
+  Given:
+    - POST /api/admin/export classified as rest_api
+    - Accepts format=csv|xml|pdf and template_id parameters
+    - No injection findings were raised
+  Good reanalysis request:
+  {
+    "endpoint_key": "POST https://erp.manufacturing.net/api/admin/export",
+    "target_agent": "vuln_analyzer",
+    "reason": "Export endpoint accepts template_id and format parameters — template_id may enable SSTI and the xml format option could allow XXE. These vectors were likely missed because the endpoint was classified as a plain rest_api rather than a file_processing or template_rendering endpoint."
+  }
+
+  Example 9 — Race condition downgrade on read-only endpoint:
+  Given indicators:
+    - race_condition MEDIUM on GET /api/v1/reports/{id}/status
+    - Endpoint is read-only, returns job status (pending/processing/complete)
+    - No state mutation observed
+  Good action:
+  {
+    "endpoint_key": "GET https://analytics.dataco.io/api/v1/reports/{id}/status",
+    "action": "adjust_confidence",
+    "pattern": "race_condition",
+    "new_confidence": "info",
+    "reason": "Race condition on a read-only status polling endpoint has no security impact — concurrent reads cannot cause state corruption. Downgrade to informational."
+  }
+
+  Example 10 — Annotate (excessive_data_exposure confirmed by response field analysis):
+  Given indicators:
+    - excessive_data_exposure MEDIUM on GET /api/v2/employees/{id}
+    - Response includes: name, email, department (expected), plus salary, home_address, emergency_contact_phone, manager_notes (unexpected)
+    - Endpoint is accessible to all authenticated users, not just HR
+  Good action:
+  {
+    "endpoint_key": "GET https://portal.corpsolutions.com/api/v2/employees/{id}",
+    "action": "adjust_confidence",
+    "pattern": "excessive_data_exposure",
+    "new_confidence": "high",
+    "reason": "Response contains salary, home address, and emergency contacts visible to all authenticated users — confirmed excessive data exposure beyond the endpoint's intended purpose. Upgrade from medium to high due to PII sensitivity."
+  }

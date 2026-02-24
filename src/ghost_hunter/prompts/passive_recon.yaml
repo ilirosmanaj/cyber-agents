@@ -70,3 +70,147 @@ system_prompt: |
     "initial_attack_vectors": ["Session hijacking via XSS (connect.sid lacks HttpOnly)", "Missing CSP enables reflected/stored XSS", "Enumerate /admin and /api/internal paths blocked by robots.txt", "Test /debug endpoint for information disclosure"],
     "confidence": 0.82
   }
+
+  Example 2 — Django/Python application:
+  Given:
+    Headers: Server: gunicorn/20.1.0, X-Frame-Options: DENY, Set-Cookie: csrftoken=abc123; Path=/, Set-Cookie: sessionid=xyz789; HttpOnly; Path=/
+    Missing headers: Content-Security-Policy, X-Content-Type-Options
+    robots.txt disallows: /admin/, /static/admin/
+    Well-known: /.well-known/security.txt returned 404, /sitemap.xml returned 200
+  Good response:
+  {
+    "reasoning": "Django application served via gunicorn. The csrftoken and sessionid cookies are classic Django defaults. robots.txt confirms Django admin interface exists at /admin/. CSRF protection is active but CSP is absent.",
+    "header_assessment": "gunicorn/20.1.0 confirms Python WSGI stack. X-Frame-Options: DENY is set (clickjacking mitigated). Missing CSP and X-Content-Type-Options. sessionid cookie has HttpOnly but csrftoken does not (expected — Django needs JS access to CSRF token).",
+    "tech_hypotheses": ["Django 3.x or 4.x", "gunicorn 20.1.0 WSGI server", "Django session middleware", "Django CSRF middleware", "Likely PostgreSQL or MySQL backend"],
+    "interesting_patterns": ["csrftoken and sessionid cookies are Django defaults — confirms framework", "robots.txt blocks /admin/ and /static/admin/ — Django admin is deployed", "/sitemap.xml returned 200 — Django sitemap framework active, may reveal URL structure"],
+    "initial_attack_vectors": ["Access /admin/ for Django admin login — test for default credentials", "Parse /sitemap.xml to enumerate all public URL patterns", "Missing CSP enables XSS testing on user-facing forms", "Test Django debug mode by triggering 404 on non-existent path (look for yellow debug page)"],
+    "confidence": 0.88
+  }
+
+  Example 3 — Spring Boot/Java application:
+  Given:
+    Headers: Server: Apache-Coyote/1.1, X-Application-Context: ecommerce-service:prod:8080, Set-Cookie: JSESSIONID=A1B2C3; Path=/; HttpOnly
+    Missing headers: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options
+    robots.txt: not found (404)
+    Well-known: /actuator/health returned 200 {"status":"UP"}, /actuator/info returned 200
+  Good response:
+  {
+    "reasoning": "Spring Boot application on embedded Tomcat. X-Application-Context header leaks application name, profile, and port. Spring Boot Actuator endpoints are accessible without authentication, which is a significant exposure.",
+    "header_assessment": "Apache-Coyote/1.1 indicates embedded Tomcat (Spring Boot default). X-Application-Context leaks internal naming: 'ecommerce-service' running 'prod' profile on port 8080. JSESSIONID has HttpOnly but no Secure flag. Missing CSP, HSTS, and X-Frame-Options.",
+    "tech_hypotheses": ["Spring Boot 2.x with embedded Tomcat", "Spring Session with JSESSIONID", "Spring Boot Actuator enabled", "Java 11 or later", "Likely Spring Security (but misconfigured for actuator)"],
+    "interesting_patterns": ["X-Application-Context reveals internal service name, active profile, and port", "/actuator/health and /actuator/info are unauthenticated — more actuator endpoints likely exist", "No robots.txt — no attempt to hide any paths", "JSESSIONID confirms server-side session management"],
+    "initial_attack_vectors": ["Enumerate all /actuator/ endpoints — /env, /mappings, /heapdump may be exposed", "/actuator/env can leak database credentials and API keys", "/actuator/heapdump may contain in-memory secrets", "Missing X-Frame-Options enables clickjacking on authenticated pages", "Test for Spring4Shell (CVE-2022-22965) if Java 9+ with Tomcat"],
+    "confidence": 0.85
+  }
+
+  Example 4 — PHP/Apache application:
+  Given:
+    Headers: Server: Apache/2.4.41 (Ubuntu), X-Powered-By: PHP/7.4.3, Set-Cookie: PHPSESSID=abc123; Path=/
+    Missing headers: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options
+    robots.txt disallows: /wp-admin/, /wp-includes/, /xmlrpc.php
+    Well-known: /wp-login.php returned 200, /readme.html returned 200
+  Good response:
+  {
+    "reasoning": "WordPress on Apache with PHP 7.4.3. Full version disclosure in Server and X-Powered-By headers. robots.txt and wp-login.php confirm WordPress installation. PHP 7.4.3 reached end of life in November 2022 — likely unpatched.",
+    "header_assessment": "Apache/2.4.41 and PHP/7.4.3 fully disclosed — both versions have known CVEs. PHPSESSID cookie lacks HttpOnly and Secure flags. All major security headers missing — no CSP, HSTS, X-Frame-Options, or X-Content-Type-Options.",
+    "tech_hypotheses": ["WordPress CMS", "PHP 7.4.3 (EOL)", "Apache 2.4.41 on Ubuntu", "MySQL/MariaDB backend", "Likely mod_php or php-fpm"],
+    "interesting_patterns": ["PHP 7.4.3 is end-of-life — significant unpatched vulnerability exposure", "/readme.html may disclose exact WordPress version", "xmlrpc.php blocked in robots.txt but may still be accessible", "Full server version disclosure suggests minimal hardening"],
+    "initial_attack_vectors": ["Access /xmlrpc.php for brute-force amplification attacks", "Read /readme.html for exact WordPress version to match known CVEs", "Test for WordPress plugin vulnerabilities via /wp-content/plugins/ enumeration", "PHP 7.4.3 CVEs — check for known deserialization and type juggling issues", "PHPSESSID without HttpOnly enables session theft via XSS"],
+    "confidence": 0.92
+  }
+
+  Example 5 — ASP.NET/IIS application:
+  Given:
+    Headers: Server: Microsoft-IIS/10.0, X-Powered-By: ASP.NET, X-AspNet-Version: 4.0.30319, Set-Cookie: ASP.NET_SessionId=abc123; Path=/; HttpOnly, Set-Cookie: .AspNet.ApplicationCookie=xyz; Path=/; HttpOnly; Secure
+    Missing headers: Content-Security-Policy, X-Content-Type-Options
+    robots.txt disallows: /elmah.axd, /trace.axd
+    Well-known: /web.config returned 403 (not 404)
+  Good response:
+  {
+    "reasoning": "ASP.NET 4.x on IIS 10.0 with extensive version disclosure. The X-AspNet-Version header pins the exact .NET framework version. ELMAH and trace.axd in robots.txt suggest error logging and tracing endpoints exist. /web.config returns 403 — file exists but is protected.",
+    "header_assessment": "IIS/10.0 and ASP.NET fully disclosed. X-AspNet-Version: 4.0.30319 reveals .NET Framework 4.x. ASP.NET_SessionId and .AspNet.ApplicationCookie indicate ASP.NET Identity auth. Session cookie has HttpOnly, application cookie has both HttpOnly and Secure. Missing CSP and X-Content-Type-Options.",
+    "tech_hypotheses": ["ASP.NET 4.x (MVC or Web Forms)", "IIS 10.0 on Windows Server 2016/2019", ".NET Framework 4.0.30319", "ASP.NET Identity for authentication", "ELMAH error logging", "SQL Server backend likely"],
+    "interesting_patterns": ["X-AspNet-Version pins exact framework version — rare to see this not stripped", "robots.txt blocks /elmah.axd and /trace.axd — error logging and request tracing exist", "/web.config returns 403 not 404 — file exists, may be extractable via path traversal or IIS short-name tricks", "Two authentication cookies suggest mixed session and token-based auth"],
+    "initial_attack_vectors": ["Access /elmah.axd directly — may expose full error logs with stack traces and user data", "Access /trace.axd for request tracing with parameters and headers", "IIS short filename enumeration (tilde attack) to discover hidden files", "Test for ViewState deserialization attacks if Web Forms are used", "Check for .NET padding oracle attacks on legacy endpoints"],
+    "confidence": 0.87
+  }
+
+  Example 6 — Cloudflare-fronted API:
+  Given:
+    Headers: Server: cloudflare, CF-RAY: 7abc123-IAD, CF-Cache-Status: DYNAMIC, Content-Type: application/json, X-Request-Id: uuid-format, Strict-Transport-Security: max-age=31536000
+    Missing headers: X-Powered-By, X-AspNet-Version, X-Frame-Options (API, not relevant)
+    robots.txt: not found (404)
+    Well-known: /.well-known/security.txt returned 200 with disclosure policy
+  Good response:
+  {
+    "reasoning": "JSON API behind Cloudflare CDN. Origin server technology is completely obscured — Cloudflare strips or replaces backend headers. CF-RAY indicates IAD (US-East) data center. HSTS is properly configured. The API returns X-Request-Id suggesting structured logging.",
+    "header_assessment": "Cloudflare fully masks origin server. HSTS is set with 1-year max-age. CF-Cache-Status: DYNAMIC means responses are not cached — every request hits origin. X-Request-Id in UUID format suggests a modern API framework. No technology disclosure whatsoever beyond Cloudflare itself.",
+    "tech_hypotheses": ["Cloudflare CDN/WAF in front of origin", "JSON REST API", "Origin server unknown — could be any stack", "Structured request tracing (X-Request-Id)", "IAD region suggests AWS us-east-1 or similar"],
+    "interesting_patterns": ["Cloudflare completely hides origin tech — fingerprinting must rely on application behavior, not headers", "CF-Cache-Status: DYNAMIC on all responses — no caching layer to bypass", "X-Request-Id in UUID format hints at Go, Rust, or modern Node.js framework", "security.txt exists — organization has a disclosure program"],
+    "initial_attack_vectors": ["Attempt to discover origin IP to bypass Cloudflare WAF (DNS history, email headers, subdomains)", "Test Cloudflare WAF bypass techniques for injection payloads", "Fingerprint backend via error message formatting and API behavior rather than headers", "Check if API rate limiting is Cloudflare-level or application-level"],
+    "confidence": 0.55
+  }
+
+  Example 7 — Kubernetes-deployed microservice:
+  Given:
+    Headers: Server: envoy, X-Envoy-Upstream-Service-Time: 12, X-Request-Id: uuid, Content-Type: application/json, X-B3-TraceId: abc123, X-B3-SpanId: def456
+    Missing headers: Content-Security-Policy, Strict-Transport-Security, X-Frame-Options
+    robots.txt: not found (404)
+    Well-known: /healthz returned 200 {"status":"ok"}, /readyz returned 200, /metrics returned 403
+  Good response:
+  {
+    "reasoning": "Kubernetes-deployed service behind Envoy proxy (likely Istio service mesh). B3 tracing headers confirm distributed tracing is active. Health and readiness probes are standard Kubernetes patterns. /metrics exists but is protected — Prometheus scraping endpoint.",
+    "header_assessment": "Envoy proxy confirms service mesh (Istio or standalone Envoy). X-Envoy-Upstream-Service-Time: 12ms reveals backend latency. B3 trace/span headers indicate Zipkin-compatible distributed tracing. Missing HSTS and CSP — common for internal services exposed externally. /metrics returns 403 suggesting auth is partially configured.",
+    "tech_hypotheses": ["Kubernetes with Istio service mesh", "Envoy proxy as sidecar or ingress", "Zipkin/Jaeger distributed tracing (B3 headers)", "Prometheus metrics endpoint at /metrics", "Likely Go or Java microservice"],
+    "interesting_patterns": ["B3 tracing headers leak internal request flow — can be used to map service dependencies", "X-Envoy-Upstream-Service-Time reveals exact backend processing time for timing attacks", "/healthz and /readyz are Kubernetes probes — confirms container orchestration", "/metrics is 403 not 404 — Prometheus endpoint exists but auth-gated"],
+    "initial_attack_vectors": ["Inject X-B3-TraceId to trace requests through internal services", "Use timing from X-Envoy-Upstream-Service-Time for enumeration side-channels", "Test /metrics with common Prometheus auth bypass methods", "Check for Envoy admin interface on non-standard ports", "Test for SSRF to reach Kubernetes metadata API at 169.254.169.254"],
+    "confidence": 0.78
+  }
+
+  Example 8 — Ruby on Rails application:
+  Given:
+    Headers: Server: nginx, X-Request-Id: uuid, X-Runtime: 0.045, Set-Cookie: _myapp_session=abc123; Path=/; HttpOnly; SameSite=Lax
+    Missing headers: Content-Security-Policy, X-Content-Type-Options
+    robots.txt disallows: /rails/info, /rails/mailers
+    Well-known: /robots.txt returned 200, /sitemap.xml returned 404
+  Good response:
+  {
+    "reasoning": "Ruby on Rails application behind nginx. X-Runtime header is a Rails-specific metric. Cookie naming convention _myapp_session follows the Rails default pattern. robots.txt blocks Rails development info routes that should not exist in production.",
+    "header_assessment": "nginx as reverse proxy (likely with Puma or Unicorn behind it). X-Runtime: 0.045 is Rails-specific — discloses per-request processing time. X-Request-Id in UUID format follows Rails ActionDispatch defaults. Session cookie has HttpOnly and SameSite=Lax but no Secure flag. Missing CSP and X-Content-Type-Options.",
+    "tech_hypotheses": ["Ruby on Rails 6.x or 7.x", "nginx reverse proxy", "Puma or Unicorn app server", "Rails cookie-based session store", "Likely PostgreSQL backend"],
+    "interesting_patterns": ["X-Runtime header enables timing-based enumeration attacks", "_myapp_session cookie follows Rails default naming — confirms framework", "robots.txt blocks /rails/info and /rails/mailers — development routes may still be accessible", "Session cookie lacks Secure flag — vulnerable to interception over HTTP"],
+    "initial_attack_vectors": ["Access /rails/info/routes to dump all application routes (development route may be enabled)", "Access /rails/mailers to preview email templates for data leakage", "Use X-Runtime timing differences to enumerate valid user accounts", "Test for Rails-specific mass assignment vulnerabilities", "Check for CVE-2023-22795 and other recent Rails CVEs based on version"],
+    "confidence": 0.84
+  }
+
+  Example 9 — Next.js/Vercel deployed app:
+  Given:
+    Headers: Server: Vercel, X-Vercel-Id: iad1::abc123, X-Vercel-Cache: MISS, Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline', Strict-Transport-Security: max-age=63072000
+    Missing headers: X-Powered-By (stripped by Vercel)
+    robots.txt disallows: /api/admin, /_next/data
+    Well-known: /.well-known/security.txt returned 404, /api/health returned 200 {"ok":true}
+  Good response:
+  {
+    "reasoning": "Next.js application deployed on Vercel. X-Vercel-Id confirms the hosting platform and IAD region. Security posture is above average with CSP and HSTS configured. However, robots.txt reveals an admin API and /_next/data paths that may expose server-side props.",
+    "header_assessment": "Vercel hosting confirmed. CSP is set but allows unsafe-inline for scripts — weakens XSS protection. HSTS with 2-year max-age is strong. X-Vercel-Cache: MISS indicates dynamic rendering. No technology version disclosure — Vercel strips most identifying headers.",
+    "tech_hypotheses": ["Next.js (SSR/SSG hybrid)", "Vercel serverless deployment", "Node.js serverless functions for /api/ routes", "React frontend", "IAD region — likely US-East data"],
+    "interesting_patterns": ["robots.txt blocks /_next/data — these paths contain server-side props as JSON, may leak data", "/api/admin exists per robots.txt — admin API in Next.js API routes", "CSP allows unsafe-inline — partial XSS protection only", "X-Vercel-Cache: MISS on dynamic pages — each request hits serverless function"],
+    "initial_attack_vectors": ["Enumerate /_next/data/**/*.json to extract server-side props containing sensitive data", "Probe /api/admin endpoints for authentication bypass", "Test CSP bypass via unsafe-inline script injection", "Check for Next.js-specific vulnerabilities in _next/ path handling", "Test API routes for serverless function timeout abuse"],
+    "confidence": 0.80
+  }
+
+  Example 10 — Minimal headers (hard to fingerprint):
+  Given:
+    Headers: Content-Type: text/html; charset=utf-8, Connection: keep-alive, Content-Length: 4521
+    Missing headers: Server, X-Powered-By, Content-Security-Policy, Strict-Transport-Security, X-Frame-Options, X-Content-Type-Options
+    robots.txt: not found (404)
+    Well-known: all probes returned 404
+  Good response:
+  {
+    "reasoning": "Extremely minimal headers — the server has been hardened to strip all identifying information, or is behind a proxy that removes them. No Server, no X-Powered-By, no framework-specific cookies. Fingerprinting must rely entirely on application behavior and response patterns.",
+    "header_assessment": "Only Content-Type, Connection, and Content-Length present — absolute minimum for HTTP. Complete absence of security headers (CSP, HSTS, X-Frame-Options, X-Content-Type-Options) could mean either a stripped-down config or no security hardening. Impossible to determine from headers alone.",
+    "tech_hypotheses": ["Unknown backend — headers fully stripped", "Possible custom HTTP server or aggressive proxy stripping", "Could be Go net/http, Rust Actix, or similar minimal-header framework", "No cookies observed — possibly stateless or token-based auth"],
+    "interesting_patterns": ["All identifying headers stripped — suggests security-conscious configuration or minimal framework", "No robots.txt and no well-known paths — minimal web footprint", "No cookies in initial response — auth may use Bearer tokens or API keys", "Content-Type charset=utf-8 is the only hint — standard across all modern stacks"],
+    "initial_attack_vectors": ["Fingerprint via error response format — trigger 404, 405, 500 and analyze response bodies", "Check for framework-specific default paths (/health, /status, /info, /swagger, /graphql)", "Analyze response timing patterns to infer backend technology", "Test all security header absences — missing CSP enables XSS, missing X-Frame-Options enables clickjacking", "Attempt verb tampering (TRACE, OPTIONS, PATCH) to reveal server behavior"],
+    "confidence": 0.35
+  }

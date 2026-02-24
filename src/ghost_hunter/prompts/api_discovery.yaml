@@ -48,4 +48,89 @@ system_prompt: |
     {"path": "/api/admin/projects", "method": "GET", "reason": "Admin variant may bypass per-project authorization"}
     {"path": "/api/projects/{id}/export", "method": "GET", "reason": "Data export endpoint — common in project tools, often returns sensitive data"}
 
+  Example 3 — Healthcare/clinic API:
+  Given: GET /api/v1/patients, GET /api/v1/patients/{id}, POST /api/v1/appointments, GET /api/v1/doctors
+  Good guesses:
+    {"path": "/api/v1/patients/{id}/records", "method": "GET", "reason": "Patient records are the core resource — medical history sub-resource is expected"}
+    {"path": "/api/v1/patients/{id}/prescriptions", "method": "GET", "reason": "Appointments exist — prescriptions per patient is the natural follow-up resource"}
+    {"path": "/api/v1/patients/{id}/billing", "method": "GET", "reason": "Healthcare apps track billing — may expose insurance details and payment info"}
+    {"path": "/api/v1/appointments/{id}", "method": "DELETE", "reason": "Appointment creation exists — cancellation/delete is the expected counterpart"}
+    {"path": "/api/v1/patients/export", "method": "GET", "reason": "HIPAA compliance often requires data export — endpoint may lack proper auth"}
+    {"path": "/api/v1/admin/patients", "method": "GET", "reason": "Admin patient list could bypass per-doctor authorization scoping"}
+
+  Example 4 — Social media API:
+  Given: GET /api/v2/posts, POST /api/v2/posts, GET /api/v2/users/{id}, POST /api/v2/posts/{id}/like
+  Good guesses:
+    {"path": "/api/v2/posts/{id}/comments", "method": "GET", "reason": "Posts with likes — comments are the other standard engagement endpoint"}
+    {"path": "/api/v2/posts/{id}/comments", "method": "POST", "reason": "Comment listing implies creation capability"}
+    {"path": "/api/v2/users/{id}/followers", "method": "GET", "reason": "Social platform — follower relationships are a core feature"}
+    {"path": "/api/v2/users/{id}/posts", "method": "GET", "reason": "User profiles and posts both exist — user-scoped post listing is expected"}
+    {"path": "/api/v2/posts/{id}", "method": "DELETE", "reason": "Post creation exists — delete for own posts is standard"}
+    {"path": "/api/v1/posts", "method": "GET", "reason": "v2 exists — v1 may still respond with weaker rate limiting or auth"}
+    {"path": "/api/v2/search", "method": "GET", "reason": "Search endpoint — may expose private posts or users via parameter manipulation"}
+
+  Example 5 — File storage/cloud service:
+  Given: GET /api/files, POST /api/files/upload, GET /api/files/{id}/download, GET /api/folders
+  Good guesses:
+    {"path": "/api/files/{id}", "method": "DELETE", "reason": "Upload exists — file deletion is the CRUD counterpart"}
+    {"path": "/api/files/{id}/share", "method": "POST", "reason": "Cloud storage services have sharing — may generate public links to private files"}
+    {"path": "/api/files/{id}/metadata", "method": "GET", "reason": "File metadata endpoint — may leak owner info, creation dates, or internal paths"}
+    {"path": "/api/files/{id}/versions", "method": "GET", "reason": "Version history — cloud services track revisions, old versions may contain sensitive data"}
+    {"path": "/api/folders/{id}/files", "method": "GET", "reason": "Folder listing exists — sub-resource for folder contents is expected"}
+    {"path": "/api/shared/files", "method": "GET", "reason": "Shared files listing — may expose files shared across the organization"}
+    {"path": "/api/admin/storage/usage", "method": "GET", "reason": "Admin storage metrics — may reveal user count and storage allocation details"}
+
+  Example 6 — Payment processing service:
+  Given: GET /api/v1/merchants/{id}, POST /api/v1/charges, GET /api/v1/charges/{id}, POST /api/v1/refunds
+  Good guesses:
+    {"path": "/api/v1/charges/{id}/receipt", "method": "GET", "reason": "Charge details exist — receipt generation is standard and may leak customer PII"}
+    {"path": "/api/v1/merchants/{id}/transactions", "method": "GET", "reason": "Merchant exists — transaction history per merchant is expected"}
+    {"path": "/api/v1/merchants/{id}/payouts", "method": "GET", "reason": "Payment processor — payout schedule is a core merchant feature"}
+    {"path": "/api/v1/merchants/{id}/api-keys", "method": "GET", "reason": "Merchant API key management — critical if exposed without proper auth"}
+    {"path": "/api/v1/webhooks", "method": "GET", "reason": "Payment services use webhooks for notifications — may expose endpoint URLs and secrets"}
+    {"path": "/api/v1/disputes", "method": "GET", "reason": "Charge and refund exist — dispute/chargeback management is the next logical resource"}
+
+  Example 7 — Chat/messaging platform:
+  Given: GET /api/conversations, POST /api/conversations, GET /api/conversations/{id}/messages, POST /api/conversations/{id}/messages
+  Good guesses:
+    {"path": "/api/conversations/{id}/members", "method": "GET", "reason": "Conversations exist — member listing is standard for group chats"}
+    {"path": "/api/conversations/{id}/members", "method": "POST", "reason": "Member listing implies ability to add members to conversations"}
+    {"path": "/api/conversations/{id}/messages/{msg_id}", "method": "DELETE", "reason": "Message creation exists — deletion is expected for message management"}
+    {"path": "/api/conversations/{id}/files", "method": "GET", "reason": "Messaging platforms support file sharing — file listing per conversation is common"}
+    {"path": "/api/users/{id}/status", "method": "GET", "reason": "Chat platform — online/offline status endpoint likely exists"}
+    {"path": "/api/conversations/{id}/export", "method": "GET", "reason": "Conversation export for compliance — may dump full message history"}
+    {"path": "/api/admin/conversations", "method": "GET", "reason": "Admin endpoint to list all conversations — privacy risk if accessible"}
+
+  Example 8 — Analytics/reporting service:
+  Given: GET /api/dashboards, GET /api/dashboards/{id}/widgets, GET /api/reports, POST /api/reports/generate
+  Good guesses:
+    {"path": "/api/reports/{id}/download", "method": "GET", "reason": "Report generation exists — download endpoint for retrieving generated reports"}
+    {"path": "/api/dashboards/{id}/share", "method": "POST", "reason": "Dashboard exists — sharing feature may create public links to sensitive data"}
+    {"path": "/api/dashboards/{id}/data", "method": "GET", "reason": "Widgets listed but raw data endpoint likely serves the underlying datasets"}
+    {"path": "/api/queries", "method": "POST", "reason": "Analytics services often allow raw SQL/query execution — injection risk"}
+    {"path": "/api/datasources", "method": "GET", "reason": "Analytics platform connects to data sources — may expose database connection strings"}
+    {"path": "/api/admin/users/activity", "method": "GET", "reason": "Admin user activity log — reveals who accessed which reports and when"}
+
+  Example 9 — Multi-tenant SaaS:
+  Given: GET /api/v1/tenants/{id}, GET /api/v1/tenants/{id}/users, POST /api/v1/tenants/{id}/users/invite, GET /api/v1/billing/plans
+  Good guesses:
+    {"path": "/api/v1/tenants/{id}/settings", "method": "GET", "reason": "Tenant management — settings endpoint may expose configuration and feature flags"}
+    {"path": "/api/v1/tenants/{id}/settings", "method": "PUT", "reason": "Settings read implies update — could allow privilege escalation via plan/role changes"}
+    {"path": "/api/v1/tenants/{id}/api-keys", "method": "GET", "reason": "SaaS platforms issue API keys per tenant — listing may expose active keys"}
+    {"path": "/api/v1/tenants", "method": "GET", "reason": "Tenant resource exists — list all tenants may work without proper scope check"}
+    {"path": "/api/v1/tenants/{id}/audit-log", "method": "GET", "reason": "Multi-tenant SaaS tracks tenant activity — audit log may reveal sensitive operations"}
+    {"path": "/api/v1/billing/invoices", "method": "GET", "reason": "Billing plans exist — invoice listing is the natural companion, may expose payment details"}
+    {"path": "/api/v1/internal/tenants/{id}/usage", "method": "GET", "reason": "Internal usage metrics per tenant — often unprotected and reveals business data"}
+
+  Example 10 — IoT device management API:
+  Given: GET /api/devices, POST /api/devices/register, GET /api/devices/{id}/status, POST /api/devices/{id}/command
+  Good guesses:
+    {"path": "/api/devices/{id}/config", "method": "GET", "reason": "Device with commands — configuration endpoint likely stores WiFi creds and API tokens"}
+    {"path": "/api/devices/{id}/config", "method": "PUT", "reason": "Config read implies write — remote reconfiguration could allow device takeover"}
+    {"path": "/api/devices/{id}/telemetry", "method": "GET", "reason": "IoT devices send telemetry — historical data endpoint is standard"}
+    {"path": "/api/devices/{id}/firmware", "method": "POST", "reason": "OTA firmware update — pushing malicious firmware would compromise the device"}
+    {"path": "/api/devices/{id}/logs", "method": "GET", "reason": "Device logs for debugging — may contain operational secrets or network topology"}
+    {"path": "/api/devices/bulk", "method": "POST", "reason": "Fleet management often supports bulk operations — high impact if authorization is weak"}
+    {"path": "/api/admin/devices", "method": "GET", "reason": "Admin device list across all users — tenant isolation bypass risk"}
+
   Keep it to 10-20 high-confidence guesses.

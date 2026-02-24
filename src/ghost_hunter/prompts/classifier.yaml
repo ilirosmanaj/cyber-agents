@@ -88,3 +88,135 @@ system_prompt: |
     ],
     "confidence": 0.95
   }
+
+  Example 3 — GraphQL endpoint:
+  Given:
+    1. POST https://storefront.cloudvault.net/graphql (200, content_type: application/json, params: query, variables)
+    2. GET https://storefront.cloudvault.net/graphql (200, content_type: text/html, GraphQL Playground UI)
+    3. GET https://storefront.cloudvault.net/api/v1/products (200, JSON array)
+  Good response:
+  {
+    "reasoning": "POST /graphql is the query endpoint; GET /graphql serves the playground UI which is documentation. Products endpoint is a standard REST API returning public data.",
+    "classifications": [
+      {"index": 1, "category": "graphql", "requires_auth": null},
+      {"index": 2, "category": "documentation", "requires_auth": false},
+      {"index": 3, "category": "rest_api", "requires_auth": false}
+    ],
+    "confidence": 0.88
+  }
+
+  Example 4 — Debug/actuator endpoints:
+  Given:
+    1. GET https://api.medisync.health/actuator/env (200, JSON with environment variables)
+    2. GET https://api.medisync.health/actuator/heapdump (200, application/octet-stream)
+    3. GET https://api.medisync.health/debug/console (200, text/html, interactive Python debugger)
+  Good response:
+  {
+    "reasoning": "All three are debug/actuator endpoints exposed without auth. The env endpoint leaks environment variables, heapdump exposes memory, and debug console provides interactive access.",
+    "classifications": [
+      {"index": 1, "category": "debug_endpoint", "requires_auth": false},
+      {"index": 2, "category": "debug_endpoint", "requires_auth": false},
+      {"index": 3, "category": "debug_endpoint", "requires_auth": false}
+    ],
+    "confidence": 0.97
+  }
+
+  Example 5 — Documentation endpoints:
+  Given:
+    1. GET https://api.finpay.io/docs (200, text/html, Swagger UI)
+    2. GET https://api.finpay.io/redoc (200, text/html, ReDoc viewer)
+    3. GET https://api.finpay.io/openapi.json (200, application/json, OpenAPI spec)
+    4. GET https://api.finpay.io/api/v1/transactions (401)
+  Good response:
+  {
+    "reasoning": "First three endpoints serve API documentation in different formats — all publicly accessible. The transactions endpoint returned 401, indicating it requires authentication.",
+    "classifications": [
+      {"index": 1, "category": "documentation", "requires_auth": false},
+      {"index": 2, "category": "documentation", "requires_auth": false},
+      {"index": 3, "category": "documentation", "requires_auth": false},
+      {"index": 4, "category": "rest_api", "requires_auth": true}
+    ],
+    "confidence": 0.96
+  }
+
+  Example 6 — Mixed API and admin with 401/403 status codes:
+  Given:
+    1. GET https://dashboard.streamline.ai/api/v1/projects (200, JSON array, Bearer token required)
+    2. GET https://dashboard.streamline.ai/api/v1/admin/audit-log (403)
+    3. DELETE https://dashboard.streamline.ai/api/v1/admin/users/42 (401)
+    4. GET https://dashboard.streamline.ai/api/v1/notifications (200, JSON array)
+  Good response:
+  {
+    "reasoning": "Projects and notifications are REST APIs requiring auth (Bearer token pattern). Admin audit-log returned 403 and admin user deletion returned 401 — both are admin endpoints behind auth.",
+    "classifications": [
+      {"index": 1, "category": "rest_api", "requires_auth": true},
+      {"index": 2, "category": "admin_endpoint", "requires_auth": true},
+      {"index": 3, "category": "admin_endpoint", "requires_auth": true},
+      {"index": 4, "category": "rest_api", "requires_auth": true}
+    ],
+    "confidence": 0.93
+  }
+
+  Example 7 — OAuth callback endpoints:
+  Given:
+    1. GET https://travelwise.app/auth/callback/google (302, params: code, state)
+    2. GET https://travelwise.app/auth/callback/github (302, params: code, state)
+    3. POST https://travelwise.app/auth/token (200, params: grant_type, code, redirect_uri)
+  Good response:
+  {
+    "reasoning": "OAuth callback endpoints handle authorization code exchange — part of auth flow and publicly accessible. The token endpoint exchanges codes for tokens, also an auth endpoint.",
+    "classifications": [
+      {"index": 1, "category": "auth_endpoint", "requires_auth": false},
+      {"index": 2, "category": "auth_endpoint", "requires_auth": false},
+      {"index": 3, "category": "auth_endpoint", "requires_auth": false}
+    ],
+    "confidence": 0.94
+  }
+
+  Example 8 — File upload endpoints:
+  Given:
+    1. POST https://quickbite.delivery/api/v1/restaurants/menu/upload (200, content_type: multipart/form-data, params: file, restaurant_id)
+    2. POST https://quickbite.delivery/api/v1/profile/avatar (200, content_type: multipart/form-data, params: image)
+    3. GET https://quickbite.delivery/uploads/menus/r123_menu.pdf (200, application/pdf)
+  Good response:
+  {
+    "reasoning": "Menu upload requires restaurant ownership — auth needed. Avatar upload operates on user profile — auth needed. The static upload path serves publicly accessible files.",
+    "classifications": [
+      {"index": 1, "category": "rest_api", "requires_auth": true},
+      {"index": 2, "category": "rest_api", "requires_auth": true},
+      {"index": 3, "category": "static_asset", "requires_auth": false}
+    ],
+    "confidence": 0.90
+  }
+
+  Example 9 — WebSocket/streaming endpoints:
+  Given:
+    1. GET https://devhub.tools/ws/build-logs (101, Upgrade: websocket)
+    2. GET https://devhub.tools/api/v1/events/stream (200, content_type: text/event-stream)
+    3. GET https://devhub.tools/api/v1/builds/latest (200, JSON)
+  Good response:
+  {
+    "reasoning": "WebSocket upgrade for build logs and SSE stream for events both serve real-time data tied to user sessions — require auth. The builds endpoint is a standard REST API also requiring auth.",
+    "classifications": [
+      {"index": 1, "category": "rest_api", "requires_auth": true},
+      {"index": 2, "category": "rest_api", "requires_auth": true},
+      {"index": 3, "category": "rest_api", "requires_auth": true}
+    ],
+    "confidence": 0.85
+  }
+
+  Example 10 — Ambiguous endpoints:
+  Given:
+    1. POST https://cloudvault.net/api/v1/actions/run (200, params: action_type, payload)
+    2. GET https://cloudvault.net/internal/metrics (200, text/plain, Prometheus format)
+    3. GET https://cloudvault.net/api/v1/config (200, JSON with feature flags)
+  Good response:
+  {
+    "reasoning": "The /actions/run endpoint accepts arbitrary action types — likely an RPC-style API requiring auth. /internal/metrics exposes Prometheus metrics which is a debug/monitoring endpoint that should not be public. /config returns feature flags — could be admin or REST, but since it's under /api/v1 and returns non-admin data, classifying as rest_api. Auth is uncertain for metrics and config.",
+    "classifications": [
+      {"index": 1, "category": "rest_api", "requires_auth": true},
+      {"index": 2, "category": "debug_endpoint", "requires_auth": null},
+      {"index": 3, "category": "rest_api", "requires_auth": null}
+    ],
+    "confidence": 0.72
+  }

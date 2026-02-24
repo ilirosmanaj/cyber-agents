@@ -59,3 +59,99 @@ system_prompt: |
     "scan_depth": "normal",
     "priority_patterns": ["v1/v2 version inconsistencies", "admin routes"]
   }
+
+  Example 3 — Django REST API with admin panel:
+  Given: GET /admin/ (302→/admin/login/), GET /api/v1/users/ (401, JSON), GET /api/v1/products/ (200, JSON), Server: gunicorn, X-Frame-Options: DENY, Content-Type includes "application/json"
+  Good response:
+  {
+    "focus_areas": ["Django admin panel brute-force and misconfiguration", "/api/v1/ endpoint auth bypass", "DRF browsable API exposure"],
+    "skip_agents": ["js_analyzer"],
+    "extra_paths_to_try": ["/admin/doc/", "/api/v1/users/me/", "/api/v1/schema/", "/api-auth/login/", "/static/rest_framework/", "/__debug__/", "/api/v1/products/?format=api"],
+    "tech_hypotheses": ["Django REST Framework on Gunicorn, likely PostgreSQL, DRF token or session auth"],
+    "scan_depth": "deep",
+    "priority_patterns": ["DRF browsable API leaking schema", "Django debug toolbar in production"]
+  }
+
+  Example 4 — Spring Boot microservice:
+  Given: GET /actuator/health (200, JSON {"status":"UP"}), GET /api/v1/inventory (200, JSON), GET /swagger-ui.html (404), Server: Apache-Coyote, X-Application-Context: inventory-service
+  Good response:
+  {
+    "focus_areas": ["Spring Actuator endpoint enumeration", "Inventory API auth testing", "Swagger/OpenAPI spec discovery"],
+    "skip_agents": ["js_analyzer"],
+    "extra_paths_to_try": ["/actuator/env", "/actuator/configprops", "/actuator/mappings", "/actuator/heapdump", "/v3/api-docs", "/swagger-ui/index.html", "/api/v1/inventory/export", "/internal/metrics"],
+    "tech_hypotheses": ["Spring Boot 2.x microservice on Tomcat, likely Java 11+, possible Eureka service registry"],
+    "scan_depth": "deep",
+    "priority_patterns": ["actuator endpoints leaking secrets", "unsecured OpenAPI spec"]
+  }
+
+  Example 5 — PHP/Laravel application:
+  Given: GET / (200, text/html with CSRF token meta tag), GET /login (200, HTML form), GET /api/user (401, JSON), Set-Cookie: laravel_session, X-Powered-By: PHP/8.1
+  Good response:
+  {
+    "focus_areas": ["Laravel auth bypass and session handling", "API route enumeration", "Blade template injection"],
+    "skip_agents": [],
+    "extra_paths_to_try": ["/telescope", "/horizon", "/_debugbar/open", "/api/user/profile", "/storage/logs/laravel.log", "/.env", "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php", "/artisan"],
+    "tech_hypotheses": ["Laravel 9+ on PHP 8.1, likely MySQL/MariaDB, Blade templating, possible Redis sessions"],
+    "scan_depth": "deep",
+    "priority_patterns": ["exposed debug tools (Telescope, Horizon, Debugbar)", ".env file disclosure"]
+  }
+
+  Example 6 — Static site with minimal API:
+  Given: GET / (200, text/html, static content), GET /about (200, text/html), GET /contact (200, text/html), GET /assets/style.css (200), Server: nginx, no Set-Cookie, no JS frameworks detected
+  Good response:
+  {
+    "focus_areas": ["Server misconfiguration", "Directory listing exposure"],
+    "skip_agents": ["js_analyzer", "hypothesis", "api_discovery"],
+    "extra_paths_to_try": ["/.git/HEAD", "/robots.txt", "/sitemap.xml", "/.htaccess", "/server-status", "/backup/", "/.well-known/security.txt"],
+    "tech_hypotheses": ["Static HTML site served by nginx, no backend framework, likely deployed from git"],
+    "scan_depth": "shallow",
+    "priority_patterns": ["exposed .git directory", "nginx misconfiguration"]
+  }
+
+  Example 7 — GraphQL-only API:
+  Given: GET /graphql (200, GraphQL Playground HTML), POST /graphql (200, JSON with __schema), GET / (404), GET /api (404), Access-Control-Allow-Origin: *, X-Powered-By: Express
+  Good response:
+  {
+    "focus_areas": ["GraphQL introspection and schema analysis", "Query depth/complexity abuse", "Mutation authorization testing"],
+    "skip_agents": ["api_discovery"],
+    "extra_paths_to_try": ["/graphql/console", "/graphiql", "/altair", "/voyager", "/graphql/schema.json", "/graphql/v2", "/.env", "/playground"],
+    "tech_hypotheses": ["Node.js/Express GraphQL server (Apollo or express-graphql), introspection enabled, wildcard CORS"],
+    "scan_depth": "deep",
+    "priority_patterns": ["introspection enabled in production", "overly permissive CORS", "unrestricted query depth"]
+  }
+
+  Example 8 — Mobile app backend (API-only, no HTML):
+  Given: GET / (200, JSON {"status":"ok","version":"3.2.1"}), GET /api/v3/auth/token (405, Method Not Allowed), POST /api/v3/feed (401, JSON), X-RateLimit-Remaining: 98, Content-Type: application/json
+  Good response:
+  {
+    "focus_areas": ["Mobile API auth flow (token/OAuth)", "Rate limit bypass", "API versioning gaps"],
+    "skip_agents": ["js_analyzer"],
+    "extra_paths_to_try": ["/api/v3/auth/login", "/api/v3/auth/register", "/api/v3/auth/refresh", "/api/v2/feed", "/api/v1/feed", "/api/v3/user/me", "/api/v3/upload", "/api/internal/config", "/health", "/api/v3/debug"],
+    "tech_hypotheses": ["API-only mobile backend, likely OAuth2 or custom token auth, rate limiting active, possible API gateway in front"],
+    "scan_depth": "normal",
+    "priority_patterns": ["deprecated API versions with weaker auth", "token refresh endpoint abuse", "rate limit bypass via header manipulation"]
+  }
+
+  Example 9 — Ruby on Rails application:
+  Given: GET / (200, text/html), GET /users/sign_in (200, HTML with authenticity_token), GET /rails/info/routes (403), X-Request-Id: uuid, X-Runtime: 0.023, Server: Phusion Passenger
+  Good response:
+  {
+    "focus_areas": ["Rails route enumeration", "Devise auth bypass", "Mass assignment testing"],
+    "skip_agents": [],
+    "extra_paths_to_try": ["/rails/info/properties", "/rails/mailers", "/sidekiq", "/admin", "/users/sign_up", "/api/v1/users", "/cable", "/assets/application.js", "/letter_opener"],
+    "tech_hypotheses": ["Ruby on Rails 6+ with Devise auth, Passenger app server, likely PostgreSQL, possible Sidekiq job queue"],
+    "scan_depth": "normal",
+    "priority_patterns": ["exposed Rails info endpoints", "Sidekiq dashboard without auth", "ActionCable WebSocket endpoints"]
+  }
+
+  Example 10 — .NET/ASP.NET application:
+  Given: GET / (200, text/html), GET /Account/Login (200, HTML with __RequestVerificationToken), GET /api/values (401), Server: Microsoft-IIS/10.0, X-Powered-By: ASP.NET, X-AspNet-Version: 4.0
+  Good response:
+  {
+    "focus_areas": ["ASP.NET auth and ViewState analysis", "IIS shortname enumeration", "Web API endpoint discovery"],
+    "skip_agents": [],
+    "extra_paths_to_try": ["/elmah.axd", "/trace.axd", "/api/swagger", "/swagger/v1/swagger.json", "/_blazor", "/signalr/negotiate", "/bin/web.config", "/web.config", "/api/values/1"],
+    "tech_hypotheses": ["ASP.NET 4.x on IIS 10, likely SQL Server backend, possible Entity Framework, Windows auth or Forms auth"],
+    "scan_depth": "deep",
+    "priority_patterns": ["exposed error logging (ELMAH)", "trace.axd information disclosure", "IIS tilde shortname vulnerability"]
+  }

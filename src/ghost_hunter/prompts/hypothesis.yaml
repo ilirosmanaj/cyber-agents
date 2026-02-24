@@ -47,4 +47,85 @@ system_prompt: |
     {"path": "/api/v1/workspaces/{id}/members", "method": "GET", "confidence": "high", "reasoning": "Invite exists, member listing is the read counterpart"}
     {"path": "/api/v1/admin/workspaces", "method": "GET", "confidence": "medium", "reasoning": "Admin variant may list all workspaces bypassing per-workspace authorization"}
 
+  Example 3 — Financial/banking app:
+  Given endpoints: GET /api/v1/accounts, GET /api/v1/accounts/{id}/balance, POST /api/v1/transfers, GET /api/v1/transactions
+  Good hypotheses:
+    {"path": "/api/v1/accounts/{id}/statements", "method": "GET", "confidence": "high", "reasoning": "Banking app with accounts and transactions — statement download is a standard feature"}
+    {"path": "/api/v1/transfers/{id}", "method": "GET", "confidence": "high", "reasoning": "Transfer creation exists — individual transfer lookup for receipt/status is expected"}
+    {"path": "/api/v1/accounts/{id}/beneficiaries", "method": "GET", "confidence": "high", "reasoning": "Transfer functionality implies saved beneficiary/payee management"}
+    {"path": "/api/v1/accounts/{id}/limits", "method": "GET", "confidence": "medium", "reasoning": "Transaction limits per account are standard — may reveal daily transfer caps"}
+    {"path": "/api/v1/admin/accounts", "method": "GET", "confidence": "medium", "reasoning": "Admin endpoint to list all accounts — IDOR risk if authorization is weak"}
+    {"path": "/api/v1/transactions/export", "method": "GET", "confidence": "medium", "reasoning": "Financial apps typically support CSV/PDF export of transaction history"}
+
+  Example 4 — Social media platform:
+  Given endpoints: GET /api/v2/feed, GET /api/v2/users/{id}/profile, POST /api/v2/posts, POST /api/v2/posts/{id}/like
+  Good hypotheses:
+    {"path": "/api/v2/posts/{id}/comments", "method": "GET", "confidence": "high", "reasoning": "Posts with likes exist — comments are the other core engagement feature"}
+    {"path": "/api/v2/posts/{id}/comments", "method": "POST", "confidence": "high", "reasoning": "Comment reading implies comment creation endpoint"}
+    {"path": "/api/v2/users/{id}/followers", "method": "GET", "confidence": "high", "reasoning": "Social platform with profiles — follower lists are standard"}
+    {"path": "/api/v2/users/{id}/posts", "method": "GET", "confidence": "high", "reasoning": "User profile exists — listing a user's posts is expected"}
+    {"path": "/api/v2/search/users", "method": "GET", "confidence": "medium", "reasoning": "Social platforms always have user search — may leak private profiles"}
+    {"path": "/api/v2/users/{id}/block", "method": "POST", "confidence": "medium", "reasoning": "Social platform safety feature — block endpoint often has weak authorization checks"}
+    {"path": "/api/v1/feed", "method": "GET", "confidence": "medium", "reasoning": "v2 endpoints suggest v1 may still be active with weaker protections"}
+
+  Example 5 — E-learning/education platform:
+  Given endpoints: GET /api/courses, GET /api/courses/{id}/lessons, POST /api/courses/{id}/enroll, GET /api/users/me/progress
+  Good hypotheses:
+    {"path": "/api/courses/{id}/lessons/{lesson_id}/content", "method": "GET", "confidence": "high", "reasoning": "Lessons listed but content served separately — may allow access to paid content without enrollment"}
+    {"path": "/api/courses/{id}/quiz", "method": "GET", "confidence": "high", "reasoning": "Education platform with progress tracking — quizzes/assessments are standard"}
+    {"path": "/api/courses/{id}/certificate", "method": "GET", "confidence": "medium", "reasoning": "Course completion often generates certificates — may be accessible before completing course"}
+    {"path": "/api/admin/courses", "method": "GET", "confidence": "medium", "reasoning": "Admin course management endpoint — may expose unpublished or draft courses"}
+    {"path": "/api/courses/{id}/reviews", "method": "GET", "confidence": "medium", "reasoning": "Course review/rating system is common on learning platforms"}
+    {"path": "/api/users/me/certificates", "method": "GET", "confidence": "medium", "reasoning": "User certificate listing — IDOR risk if user ID is guessable"}
+
+  Example 6 — IoT dashboard:
+  Given endpoints: GET /api/devices, GET /api/devices/{id}/telemetry, POST /api/devices/{id}/command, GET /api/alerts
+  Good hypotheses:
+    {"path": "/api/devices/{id}/config", "method": "GET", "confidence": "high", "reasoning": "IoT devices with command endpoint — configuration retrieval is standard and may leak credentials"}
+    {"path": "/api/devices/{id}/config", "method": "PUT", "confidence": "high", "reasoning": "Device config is readable — update endpoint likely exists and could allow device takeover"}
+    {"path": "/api/devices/{id}/firmware", "method": "GET", "confidence": "medium", "reasoning": "IoT platforms manage firmware — download endpoint may expose proprietary code"}
+    {"path": "/api/devices/{id}/firmware/update", "method": "POST", "confidence": "medium", "reasoning": "OTA firmware update endpoint — could be abused to push malicious firmware"}
+    {"path": "/api/devices/bulk-command", "method": "POST", "confidence": "medium", "reasoning": "Bulk operations on device fleets — high-impact if authorization is weak"}
+    {"path": "/api/devices/{id}/logs", "method": "GET", "confidence": "medium", "reasoning": "Device logs for debugging — may contain sensitive operational data"}
+
+  Example 7 — CI/CD platform:
+  Given endpoints: GET /api/v1/pipelines, POST /api/v1/pipelines/{id}/trigger, GET /api/v1/pipelines/{id}/builds, GET /api/v1/repos
+  Good hypotheses:
+    {"path": "/api/v1/pipelines/{id}/builds/{build_id}/logs", "method": "GET", "confidence": "high", "reasoning": "Build listing exists — log retrieval is standard and may leak secrets from build output"}
+    {"path": "/api/v1/pipelines/{id}/variables", "method": "GET", "confidence": "high", "reasoning": "CI/CD pipelines use environment variables — this endpoint often exposes API keys and passwords"}
+    {"path": "/api/v1/pipelines/{id}/artifacts", "method": "GET", "confidence": "high", "reasoning": "Build artifacts download — may contain compiled binaries or deployment packages"}
+    {"path": "/api/v1/repos/{id}/webhooks", "method": "GET", "confidence": "medium", "reasoning": "Repository webhooks may leak webhook secrets or internal service URLs"}
+    {"path": "/api/v1/admin/runners", "method": "GET", "confidence": "medium", "reasoning": "CI/CD runner management — admin endpoint may list infrastructure details"}
+    {"path": "/api/v1/pipelines/{id}/config", "method": "GET", "confidence": "medium", "reasoning": "Pipeline configuration (YAML/JSON) may contain hardcoded credentials or internal hostnames"}
+
+  Example 8 — Food delivery service:
+  Given endpoints: GET /api/restaurants, GET /api/restaurants/{id}/menu, POST /api/orders, GET /api/orders/{id}/track
+  Good hypotheses:
+    {"path": "/api/orders/{id}", "method": "GET", "confidence": "high", "reasoning": "Order tracking exists — full order details endpoint likely has IDOR vulnerability"}
+    {"path": "/api/restaurants/{id}/reviews", "method": "GET", "confidence": "high", "reasoning": "Restaurant listing implies review system — standard for food delivery platforms"}
+    {"path": "/api/orders/{id}/cancel", "method": "POST", "confidence": "high", "reasoning": "Order placement exists — cancellation is the expected counterpart action"}
+    {"path": "/api/drivers/{id}/location", "method": "GET", "confidence": "medium", "reasoning": "Order tracking implies driver location sharing — may leak real-time GPS data"}
+    {"path": "/api/promo/validate", "method": "POST", "confidence": "medium", "reasoning": "Food delivery apps use promo codes — validation endpoint may allow brute-forcing valid codes"}
+    {"path": "/api/admin/orders", "method": "GET", "confidence": "medium", "reasoning": "Admin order overview — may expose all customer orders and personal data"}
+
+  Example 9 — Real estate platform:
+  Given endpoints: GET /api/listings, GET /api/listings/{id}, POST /api/listings/{id}/inquiry, GET /api/agents
+  Good hypotheses:
+    {"path": "/api/listings/{id}/images", "method": "GET", "confidence": "high", "reasoning": "Listings exist — image gallery is standard and may expose internal storage URLs"}
+    {"path": "/api/listings/search", "method": "GET", "confidence": "high", "reasoning": "Listings collection implies advanced search — query parameters may allow data extraction"}
+    {"path": "/api/agents/{id}/listings", "method": "GET", "confidence": "high", "reasoning": "Agents listed — their associated listings is a natural sub-resource"}
+    {"path": "/api/listings/{id}/documents", "method": "GET", "confidence": "medium", "reasoning": "Real estate listings may have attached documents (deeds, inspections) — sensitive if accessible"}
+    {"path": "/api/admin/listings", "method": "GET", "confidence": "medium", "reasoning": "Admin listing management — may expose draft/unlisted properties and seller contact info"}
+    {"path": "/api/agents/{id}/inquiries", "method": "GET", "confidence": "medium", "reasoning": "Inquiry system implies agent inbox — IDOR could leak buyer contact info and messages"}
+
+  Example 10 — HR/employee management system:
+  Given endpoints: GET /api/employees, GET /api/employees/{id}, POST /api/leave-requests, GET /api/departments
+  Good hypotheses:
+    {"path": "/api/employees/{id}/salary", "method": "GET", "confidence": "high", "reasoning": "Employee records exist — salary data is the highest-value sub-resource and often poorly protected"}
+    {"path": "/api/employees/{id}/documents", "method": "GET", "confidence": "high", "reasoning": "HR systems store employee documents (contracts, IDs) — sensitive PII if accessible"}
+    {"path": "/api/employees/{id}/leave-requests", "method": "GET", "confidence": "high", "reasoning": "Leave request creation exists — per-employee leave history is the read counterpart"}
+    {"path": "/api/employees/export", "method": "GET", "confidence": "medium", "reasoning": "Bulk employee data export — common in HR tools and devastating if auth is missing"}
+    {"path": "/api/payroll/run", "method": "POST", "confidence": "medium", "reasoning": "HR system with salary data — payroll execution endpoint would be high-impact"}
+    {"path": "/api/admin/employees", "method": "GET", "confidence": "medium", "reasoning": "Admin variant may return full employee records including SSN/tax IDs across all departments"}
+
   Generate 15-25 hypotheses, prioritizing high-confidence ones.

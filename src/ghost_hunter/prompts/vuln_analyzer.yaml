@@ -137,3 +137,124 @@ system_prompt: |
     ],
     "confidence_adjustments": []
   }
+
+  Example 4 — Confidence upgrade (BOLA on financial endpoint):
+  Given: GET /api/v1/accounts/{account_id}/balance (auth=true, VULN=bola_idor HIGH)
+  Good analysis:
+  {
+    "endpoint_key": "GET https://finpay.io/api/v1/accounts/{account_id}/balance",
+    "new_indicators": [],
+    "suppressions": [],
+    "confidence_adjustments": [
+      {
+        "original_pattern": "bola_idor",
+        "new_confidence": "critical",
+        "reason": "Endpoint exposes real-time account balance — financial PII. Sequential account_id allows full enumeration of customer balances across the platform."
+      }
+    ]
+  }
+
+  Example 5 — Semantic variant detection (SSRF via service_url):
+  Given: POST /api/v1/integrations/webhook (auth=true, body fields: name, service_url, events)
+  No existing indicators.
+  Good analysis:
+  {
+    "endpoint_key": "POST https://devhub.tools/api/v1/integrations/webhook",
+    "new_indicators": [
+      {
+        "pattern": "ssrf",
+        "confidence": "high",
+        "evidence": "Body field service_url accepts a user-supplied URL that the server will issue requests to when events fire — not in standard regex set",
+        "description": "POST /api/v1/integrations/webhook accepts service_url in the request body. An attacker could point service_url to http://169.254.169.254/latest/meta-data/ to reach cloud metadata from the server side.",
+        "chain_with": null
+      }
+    ],
+    "suppressions": [],
+    "confidence_adjustments": []
+  }
+
+  Example 6 — False positive suppression (race condition on idempotent GET):
+  Given: GET /api/v1/patients/{patient_id}/records (auth=true, VULN=race_condition MEDIUM)
+  Good analysis:
+  {
+    "endpoint_key": "GET https://medisync.health/api/v1/patients/{patient_id}/records",
+    "new_indicators": [],
+    "suppressions": [
+      {
+        "original_pattern": "race_condition",
+        "reason": "GET is idempotent and read-only — concurrent requests return the same data with no state mutation, so race conditions have no exploitable impact"
+      }
+    ],
+    "confidence_adjustments": []
+  }
+
+  Example 7 — Chained vulnerability (broken_function_level_auth + info_disclosure on admin endpoint):
+  Given: GET /api/v1/admin/models/{model_id}/config (auth=true, VULN=broken_function_level_auth HIGH, VULN=info_disclosure MEDIUM)
+  Good analysis:
+  {
+    "endpoint_key": "GET https://streamline.ai/api/v1/admin/models/{model_id}/config",
+    "new_indicators": [
+      {
+        "pattern": "chained_vulnerability",
+        "confidence": "critical",
+        "evidence": "broken_function_level_auth + info_disclosure on admin model config endpoint",
+        "description": "A regular user can access /api/v1/admin/models/{model_id}/config which returns internal model parameters, API keys for upstream providers, and training data paths. Broken function-level auth exposes admin-only configuration to any authenticated user.",
+        "chain_with": null
+      }
+    ],
+    "suppressions": [],
+    "confidence_adjustments": []
+  }
+
+  Example 8 — Semantic variant detection (command injection via host parameter):
+  Given: POST /api/v1/tools/ping (auth=true, body fields: host, count, timeout)
+  No existing indicators.
+  Good analysis:
+  {
+    "endpoint_key": "POST https://cloudvault.net/api/v1/tools/ping",
+    "new_indicators": [
+      {
+        "pattern": "command_injection",
+        "confidence": "high",
+        "evidence": "Body field host is passed to a network diagnostic tool — likely constructed as a shell command (e.g., ping -c {count} {host})",
+        "description": "POST /api/v1/tools/ping accepts a host parameter that is likely interpolated into a shell command. An attacker could inject 8.8.8.8; cat /etc/passwd to execute arbitrary commands on the server.",
+        "chain_with": null
+      }
+    ],
+    "suppressions": [],
+    "confidence_adjustments": []
+  }
+
+  Example 9 — Confidence downgrade (mass_assignment on registration with only safe fields):
+  Given: POST /api/v1/auth/register (auth=false, body fields: email, password, display_name, VULN=mass_assignment LOW)
+  Good analysis:
+  {
+    "endpoint_key": "POST https://travelwise.app/api/v1/auth/register",
+    "new_indicators": [],
+    "suppressions": [],
+    "confidence_adjustments": [
+      {
+        "original_pattern": "mass_assignment",
+        "new_confidence": "info",
+        "reason": "Registration body contains only standard safe fields (email, password, display_name) — no role, tier, admin, or privilege-related fields present. Mass assignment has no exploitable impact here."
+      }
+    ]
+  }
+
+  Example 10 — Chained vulnerability (file_upload + auth_boundary_gap on public upload):
+  Given: POST /api/v1/uploads/menu-image (auth=false, content_type=multipart/form-data, VULN=file_upload MEDIUM, VULN=auth_boundary_gap HIGH)
+  Good analysis:
+  {
+    "endpoint_key": "POST https://quickbite.delivery/api/v1/uploads/menu-image",
+    "new_indicators": [
+      {
+        "pattern": "chained_vulnerability",
+        "confidence": "critical",
+        "evidence": "auth_boundary_gap + file_upload on unauthenticated upload endpoint",
+        "description": "POST /api/v1/uploads/menu-image accepts file uploads with no authentication. An attacker can upload malicious files (web shells, polyglot images) without any credentials. If the upload directory is web-accessible, this leads to remote code execution.",
+        "chain_with": null
+      }
+    ],
+    "suppressions": [],
+    "confidence_adjustments": []
+  }

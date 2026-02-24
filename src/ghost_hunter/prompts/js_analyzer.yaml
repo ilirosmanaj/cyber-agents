@@ -56,3 +56,195 @@ system_prompt: |
     "auth_patterns": ["JWT stored in localStorage (XSS-accessible), attached as Bearer token via axios defaults, silent refresh on 401"],
     "notes": "Token in localStorage is vulnerable to XSS exfiltration. Refresh token flow exists — check for token endpoint"
   }
+
+  Example 3 — Vue.js API client with router guards:
+  Given snippet:
+    import axios from 'axios';
+    const api = axios.create({ baseURL: 'https://api.taskflow.dev/v2' });
+    api.interceptors.request.use(cfg => { cfg.headers.Authorization = `Bearer ${store.state.auth.token}`; return cfg; });
+    router.beforeEach((to, from, next) => {
+      if (to.meta.requiresAdmin && !store.getters['auth/isAdmin']) { next('/forbidden'); return; }
+      next();
+    });
+    export const listProjects = () => api.get('/projects');
+    export const deleteProject = (pid) => api.delete(`/projects/${pid}`);
+    export const inviteMember = (pid, email) => api.post(`/projects/${pid}/members`, { email, role: 'editor' });
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/v2/projects", "method": "GET", "evidence": "axios instance with baseURL https://api.taskflow.dev/v2 + api.get('/projects')"},
+      {"path": "/v2/projects/{pid}", "method": "DELETE", "evidence": "Dynamic project ID in template literal via api.delete"},
+      {"path": "/v2/projects/{pid}/members", "method": "POST", "evidence": "Nested resource — sends email and role in JSON body"}
+    ],
+    "auth_patterns": ["Bearer token pulled from Vuex store (store.state.auth.token) and injected via axios request interceptor", "Client-side admin check in router guard (to.meta.requiresAdmin) — easily bypassed, server must enforce"],
+    "notes": "Router guard checks admin client-side only — test whether /projects/{pid} DELETE is enforced server-side for non-admin users. The role field in inviteMember could be a mass assignment target."
+  }
+
+  Example 4 — Angular HttpClient service calls:
+  Given snippet:
+    @Injectable({ providedIn: 'root' })
+    export class OrderService {
+      private base = environment.apiUrl + '/orders';
+      constructor(private http: HttpClient) {}
+      getOrder(id: string) { return this.http.get<Order>(`${this.base}/${id}`); }
+      cancelOrder(id: string) { return this.http.patch(`${this.base}/${id}/cancel`, {}); }
+      exportCsv(dateRange: any) { return this.http.post(`${this.base}/export`, dateRange, { responseType: 'blob' }); }
+      adminOverride(id: string, status: string) { return this.http.put(`/internal/admin/orders/${id}`, { status }); }
+    }
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/orders/{id}", "method": "GET", "evidence": "Built from environment.apiUrl + '/orders' base, dynamic id in template literal"},
+      {"path": "/orders/{id}/cancel", "method": "PATCH", "evidence": "State-change endpoint with empty body — cancel action"},
+      {"path": "/orders/export", "method": "POST", "evidence": "Exports CSV with date range filter — blob response type"},
+      {"path": "/internal/admin/orders/{id}", "method": "PUT", "evidence": "Hardcoded /internal/admin path — bypasses base URL, admin-only status override"}
+    ],
+    "auth_patterns": [],
+    "notes": "The adminOverride method uses a hardcoded /internal/admin prefix instead of the environment base URL — this suggests an internal admin API that may have different auth requirements. The export endpoint accepting arbitrary dateRange could be an injection point."
+  }
+
+  Example 5 — React with environment-specific API URLs (staging URL leaked):
+  Given snippet:
+    const config = {
+      production: { api: "https://api.medportal.io/v1" },
+      staging: { api: "https://staging-api.medportal.internal:8443/v1" },
+      dev: { api: "http://localhost:3001/v1" }
+    };
+    const BASE = config[process.env.REACT_APP_ENV || "production"].api;
+    export async function fetchPatientSummary(patientId) {
+      return fetch(`${BASE}/patients/${patientId}/summary`, { credentials: 'include' });
+    }
+    export async function uploadScan(patientId, file) {
+      const fd = new FormData(); fd.append('scan', file);
+      return fetch(`${BASE}/patients/${patientId}/scans`, { method: 'POST', body: fd, credentials: 'include' });
+    }
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/v1/patients/{patientId}/summary", "method": "GET", "evidence": "Template literal with dynamic patientId, credentials: include sends cookies"},
+      {"path": "/v1/patients/{patientId}/scans", "method": "POST", "evidence": "FormData file upload — multipart request with dynamic patientId"}
+    ],
+    "auth_patterns": ["Cookie-based auth via credentials: 'include' on all fetch calls"],
+    "notes": "CRITICAL: Staging URL leaked in production bundle — https://staging-api.medportal.internal:8443/v1 exposes internal hostname and non-standard port. Staging environments often have weaker auth. The scan upload endpoint accepts arbitrary files with no visible client-side validation."
+  }
+
+  Example 6 — GraphQL client setup (Apollo):
+  Given snippet:
+    import { ApolloClient, InMemoryCache, createHttpLink } from '@apollo/client';
+    import { setContext } from '@apollo/client/link/context';
+    const httpLink = createHttpLink({ uri: 'https://gql.shopnest.com/graphql' });
+    const authLink = setContext((_, { headers }) => ({
+      headers: { ...headers, 'x-api-key': 'sk_live_29fGa8xKpQ3rTm', authorization: `Bearer ${sessionStorage.getItem('jwt')}` }
+    }));
+    const client = new ApolloClient({ link: authLink.concat(httpLink), cache: new InMemoryCache() });
+    export const SEARCH_PRODUCTS = gql`query SearchProducts($term: String!) { searchProducts(term: $term) { id name price } }`;
+    export const CREATE_ORDER = gql`mutation CreateOrder($items: [OrderItemInput!]!) { createOrder(items: $items) { id total status } }`;
+    export const ADMIN_USERS = gql`query { adminListUsers { id email role lastLogin } }`;
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/graphql", "method": "POST", "evidence": "Apollo httpLink URI points to https://gql.shopnest.com/graphql — all queries and mutations go through this endpoint"}
+    ],
+    "auth_patterns": ["Hardcoded API key 'sk_live_29fGa8xKpQ3rTm' in x-api-key header — live production key leaked in client bundle", "JWT from sessionStorage attached as Bearer token via Apollo auth link"],
+    "notes": "CRITICAL: Live API key sk_live_29fGa8xKpQ3rTm is hardcoded in the frontend bundle. The adminListUsers query suggests admin functionality accessible from the client — verify server-side authorization. GraphQL introspection should be tested at /graphql to discover additional queries/mutations."
+  }
+
+  Example 7 — WebSocket connection setup:
+  Given snippet:
+    const WS_URL = "wss://realtime.traderflow.net/ws";
+    const socket = new WebSocket(`${WS_URL}?token=${getAuthToken()}`);
+    socket.onopen = () => { socket.send(JSON.stringify({ type: "subscribe", channels: ["trades", "orderbook"] })); };
+    socket.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === "trade_exec") { updatePortfolio(msg.payload); }
+    };
+    // Fallback polling if WS fails
+    const fallbackPoll = () => fetch("https://realtime.traderflow.net/api/v1/trades/stream?since=" + lastTimestamp);
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/ws", "method": "GET", "evidence": "WebSocket upgrade at wss://realtime.traderflow.net/ws — token passed as query parameter"},
+      {"path": "/api/v1/trades/stream", "method": "GET", "evidence": "HTTP fallback polling endpoint with since timestamp parameter"}
+    ],
+    "auth_patterns": ["Auth token passed as URL query parameter on WebSocket connection — token will appear in server access logs and potentially proxies"],
+    "notes": "Token in WebSocket URL query string is a security concern — it leaks in logs, browser history, and Referer headers. The subscribe message with channel names (trades, orderbook) suggests other channels may exist. The fallback polling endpoint uses timestamp-based pagination — test for IDOR by manipulating the since parameter."
+  }
+
+  Example 8 — Service worker with API caching:
+  Given snippet:
+    const CACHE_NAME = 'apicache-v3';
+    const API_ROUTES = [
+      'https://api.learnhub.io/v2/courses',
+      'https://api.learnhub.io/v2/user/progress',
+      'https://api.learnhub.io/v2/certificates'
+    ];
+    self.addEventListener('fetch', (event) => {
+      if (API_ROUTES.some(r => event.request.url.startsWith(r))) {
+        event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request)));
+      }
+      if (event.request.url.includes('/admin/analytics')) {
+        event.respondWith(fetch(event.request, { headers: { 'X-Internal-Token': 'intk_8f3a2b' } }));
+      }
+    });
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/v2/courses", "method": "GET", "evidence": "Hardcoded in service worker API_ROUTES cache list"},
+      {"path": "/v2/user/progress", "method": "GET", "evidence": "Hardcoded in service worker API_ROUTES cache list — user-specific data being cached"},
+      {"path": "/v2/certificates", "method": "GET", "evidence": "Hardcoded in service worker API_ROUTES cache list"},
+      {"path": "/admin/analytics", "method": "GET", "evidence": "Matched by URL substring check in service worker fetch handler"}
+    ],
+    "auth_patterns": ["Internal token 'intk_8f3a2b' injected via X-Internal-Token header for /admin/analytics requests — hardcoded in service worker"],
+    "notes": "Service worker caches user-specific data (/user/progress) which persists even after logout — potential session data leak. Internal admin token hardcoded in the service worker is accessible to any user. The /admin/analytics endpoint uses a separate auth mechanism from the main API."
+  }
+
+  Example 9 — jQuery legacy code with $.ajax calls:
+  Given snippet:
+    var baseUrl = "https://crm.brightsales.com/api";
+    $.ajax({
+      url: baseUrl + "/contacts/" + contactId + "/notes",
+      type: "GET",
+      beforeSend: function(xhr) { xhr.setRequestHeader("X-CSRF-Token", $('meta[name=csrf]').attr('content')); }
+    });
+    $.post(baseUrl + "/contacts/" + contactId + "/merge", { targetId: targetContactId }, function(resp) {
+      window.location = "/contacts/" + resp.mergedId;
+    });
+    $.ajax({ url: "/legacy/export-all", type: "GET", xhrFields: { withCredentials: true }, success: function(data) { downloadBlob(data); } });
+    // TODO: remove after migration
+    $.get("http://old-api.brightsales.local:9090/v1/sync?key=svc_4829fa", function(d) { console.log("sync ok"); });
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/api/contacts/{contactId}/notes", "method": "GET", "evidence": "String concatenation with contactId in $.ajax call"},
+      {"path": "/api/contacts/{contactId}/merge", "method": "POST", "evidence": "$.post with contactId and targetContactId — merge action combines two contact records"},
+      {"path": "/legacy/export-all", "method": "GET", "evidence": "Relative path with withCredentials — legacy export endpoint, no visible pagination or filtering"},
+      {"path": "/v1/sync", "method": "GET", "evidence": "Internal hostname old-api.brightsales.local:9090 with hardcoded service key in query string"}
+    ],
+    "auth_patterns": ["CSRF token read from meta tag and attached via X-CSRF-Token header on ajax requests", "Cookie-based auth via withCredentials: true on legacy export", "Hardcoded service key 'svc_4829fa' in query string for internal sync endpoint"],
+    "notes": "Internal hostname old-api.brightsales.local:9090 leaked — indicates internal network service still active. The /legacy/export-all endpoint with no filters could dump entire contact database. The merge endpoint takes a targetContactId — test for IDOR by merging contacts belonging to other users."
+  }
+
+  Example 10 — Dynamic path construction with string concatenation:
+  Given snippet:
+    const svc = window.__CONFIG__.services;
+    function buildUrl(service, path) { return svc[service].host + "/api/" + svc[service].version + path; }
+    function getInvoice(id) { return fetch(buildUrl("billing", "/invoices/" + id), { headers: authHeaders() }); }
+    function refundInvoice(id, amt) {
+      return fetch(buildUrl("billing", "/invoices/" + id + "/refund"), {
+        method: "POST", headers: authHeaders(), body: JSON.stringify({ amount: amt })
+      });
+    }
+    function getUserRole(uid) { return fetch(buildUrl("iam", "/users/" + uid + "/role")); }
+    // Debug helper left in prod
+    function _debugDump(svcName) { return fetch(buildUrl(svcName, "/__debug/dump"), { headers: { "X-Debug": "1" } }); }
+  Good response:
+  {
+    "endpoints": [
+      {"path": "/api/{version}/invoices/{id}", "method": "GET", "evidence": "Built via buildUrl helper — service config from window.__CONFIG__.services.billing"},
+      {"path": "/api/{version}/invoices/{id}/refund", "method": "POST", "evidence": "Refund action with amount in JSON body — financial endpoint via buildUrl"},
+      {"path": "/api/{version}/users/{uid}/role", "method": "GET", "evidence": "Role lookup on IAM service via buildUrl('iam', ...) — no auth headers passed"},
+      {"path": "/api/{version}/__debug/dump", "method": "GET", "evidence": "Debug endpoint accessible via _debugDump helper — X-Debug header, works for any service"}
+    ],
+    "auth_patterns": ["authHeaders() function used for billing endpoints but NOT for IAM getUserRole call — possible missing auth", "X-Debug: 1 header used for debug dump — trivial to replicate"],
+    "notes": "Runtime config in window.__CONFIG__.services exposes service hosts and versions — inspect this object in browser console. The _debugDump function is a debug helper left in production that can dump internal state for ANY service. The getUserRole endpoint has no auth headers — potential unauthenticated role enumeration. The refund endpoint handles financial transactions and should be tested for race conditions and amount manipulation."
+  }
