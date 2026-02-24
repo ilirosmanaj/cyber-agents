@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -10,6 +11,8 @@ import httpx
 
 from src.ghost_hunter.clients import AdaptiveHttpClient, LLMClient, trace_span
 from src.ghost_hunter.models import AgentResult, ScanState
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.ghost_hunter.prompts import PromptRegistry
@@ -52,6 +55,14 @@ class BaseAgent(ABC):
                 )
 
             result.duration_seconds = time.monotonic() - start
+
+            logger.info(
+                "[%s] completed in %.1fs - %d endpoints, %d findings",
+                self.name,
+                result.duration_seconds,
+                len(result.endpoints_found),
+                len(result.findings),
+            )
 
             if span is not None:
                 span.update(

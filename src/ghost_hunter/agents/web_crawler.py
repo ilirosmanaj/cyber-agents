@@ -179,6 +179,11 @@ class WebCrawlerAgent(BaseAgent):
             findings.extend(intel_findings)
             logger.info("LLM HTML analysis found %d findings", len(intel_findings))
 
+        logger.info(
+            "Crawl done: %d pages, %d endpoints, %d JS files",
+            pages_crawled, len(endpoints), len(state.js_urls),
+        )
+
         if pages_crawled > 0:
             findings.append(
                 Finding(

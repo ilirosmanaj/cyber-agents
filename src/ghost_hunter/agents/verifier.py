@@ -104,6 +104,11 @@ class VerifierAgent(BaseAgent):
                 cross_cutting_notes.extend(response.cross_cutting_notes)
                 state.reanalysis_requests.extend(response.reanalysis_requests)
 
+                logger.info(
+                    "Verifier batch %d: %d suppressed, %d adjusted, %d annotated",
+                    batch_idx, s, a, n,
+                )
+
             except Exception as e:
                 errors.append(f"Verification batch {batch_idx} failed: {e}")
                 logger.warning("Verifier LLM call failed: %s", e)

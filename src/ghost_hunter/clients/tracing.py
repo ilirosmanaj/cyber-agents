@@ -6,6 +6,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Generator
 
+import requests
 from langfuse import Langfuse
 from opentelemetry import trace as otel_trace_api
 
@@ -40,7 +41,7 @@ def init_langfuse() -> Langfuse | None:
 
 
 def create_trace(name: str, session_id: str, metadata: dict | None = None) -> str | None:
-    """Create a trace ID and store name/session for the first span to register."""
+    """Create a trace ID and store name/session for finalization after flush."""
     global _trace_id, _trace_name, _trace_session_id, _trace_metadata
     if _langfuse is None:
         return None
@@ -49,21 +50,6 @@ def create_trace(name: str, session_id: str, metadata: dict | None = None) -> st
     _trace_session_id = session_id
     _trace_metadata = metadata
     return _trace_id
-
-
-def _register_trace_if_needed() -> None:
-    """Set the trace name/session on the first span, then clear the pending state."""
-    global _trace_name, _trace_session_id, _trace_metadata
-    if _langfuse is None or _trace_name is None:
-        return
-    _langfuse.update_current_trace(
-        name=_trace_name,
-        session_id=_trace_session_id,
-        metadata=_trace_metadata,
-    )
-    _trace_name = None
-    _trace_session_id = None
-    _trace_metadata = None
 
 
 @contextmanager
@@ -79,7 +65,6 @@ def trace_span(name: str, metadata: dict | None = None) -> Generator:
         kwargs["trace_context"] = {"trace_id": _trace_id}
 
     with _langfuse.start_as_current_span(**kwargs) as span:
-        _register_trace_if_needed()
         try:
             yield span
         except Exception as e:
@@ -124,10 +109,40 @@ def trace_generation(
     gen.end()
 
 
+def _finalize_trace() -> None:
+    """Set trace name/session via REST API after all observations are flushed.
+
+    The OTel-based update_current_trace doesn't reliably persist the trace name
+    because later observations can overwrite it. The REST API upsert is authoritative.
+    """
+    if _trace_id is None or _trace_name is None:
+        return
+
+    host = settings.langfuse_host.rstrip("/")
+    payload: dict[str, Any] = {"id": _trace_id, "name": _trace_name}
+    if _trace_session_id:
+        payload["sessionId"] = _trace_session_id
+    if _trace_metadata:
+        payload["metadata"] = _trace_metadata
+
+    try:
+        resp = requests.post(
+            url=f"{host}/api/public/traces",
+            json=payload,
+            auth=(settings.langfuse_public_key, settings.langfuse_secret_key),
+            timeout=5,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Failed to finalize trace name: %s", e)
+
+
 def flush_langfuse() -> None:
-    """Flush any pending Langfuse events."""
+    """Flush pending Langfuse events and finalize the trace name."""
     if _langfuse is not None:
         try:
             _langfuse.flush()
         except Exception as e:
             logger.warning("Failed to flush Langfuse: %s", e)
+
+    _finalize_trace()

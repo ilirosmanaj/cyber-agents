@@ -96,6 +96,7 @@ class Orchestrator:
                 if not runnable:
                     continue
 
+                logger.info("Starting wave: [%s]", ", ".join(runnable))
                 results = await asyncio.gather(
                     *[self._run_agent(name) for name in runnable]
                 )
@@ -114,6 +115,11 @@ class Orchestrator:
                 if "verifier" in runnable:
                     await self._handle_reanalysis()
 
+        logger.info(
+            "Scan complete - %d endpoints, %d findings",
+            len(self.state.endpoints),
+            len(self.state.findings),
+        )
         return self.state
 
     def _should_skip(self, name: str) -> bool:

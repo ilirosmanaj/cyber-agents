@@ -166,6 +166,11 @@ class HypothesisAgent(BaseAgent):
                 )
                 validated += 1
 
+            logger.info(
+                "Hypotheses: %d generated, %d probed, %d validated",
+                len(response.hypotheses), total, validated,
+            )
+
             detail = (
                 f"LLM generated {len(response.hypotheses)} hypotheses. "
                 f"After filtering known endpoints, {total} were probed. "

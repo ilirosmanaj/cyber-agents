@@ -207,6 +207,12 @@ class APIDiscoveryAgent(BaseAgent):
         endpoints.extend(spec_eps)
         findings.extend(spec_findings)
 
+        if spec_findings:
+            logger.info(
+                "OpenAPI specs found: %d specs, %d endpoints extracted",
+                len(spec_findings), len(spec_eps),
+            )
+
         common_eps, sensitive_findings = await self._probe_common_and_sensitive(state)
         endpoints.extend(common_eps)
         findings.extend(sensitive_findings)
@@ -226,6 +232,9 @@ class APIDiscoveryAgent(BaseAgent):
         endpoints.extend(llm_eps)
         findings.extend(llm_findings)
         errors.extend(llm_errors)
+
+        if llm_eps:
+            logger.info("LLM API guessing: %d validated endpoints", len(llm_eps))
 
         cors_findings = await self._check_cors_and_methods(state, endpoints)
         findings.extend(cors_findings)

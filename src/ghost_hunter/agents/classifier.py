@@ -157,13 +157,16 @@ class ClassifierAgent(BaseAgent):
             if ep.requires_auth is None and ep.status_code in (401, 403):
                 ep.requires_auth = True
 
+        category_summary = self._category_summary(state)
+        logger.info("Classification: %s", category_summary)
+
         override_note = f" ({override_count} rule overrides)" if override_count else ""
         findings.append(
             Finding(
                 agent_name=self.name,
                 finding_type="classification_complete",
                 title=f"Classified {classified_count}/{len(all_endpoints)} endpoints{override_note}",
-                detail=self._category_summary(state),
+                detail=category_summary,
                 severity=RiskLevel.INFO,
             )
         )

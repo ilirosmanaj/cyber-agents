@@ -85,10 +85,23 @@ class PassiveReconAgent(BaseAgent):
         findings.extend(fds)
         errors.extend(errs)
 
+        parts = []
+        if fp.server:
+            parts.append(f"server={fp.server}")
+        if fp.frameworks:
+            parts.append(f"frameworks={','.join(fp.frameworks)}")
+        if fp.missing_security_headers:
+            parts.append(f"missing_headers={len(fp.missing_security_headers)}")
+        if parts:
+            logger.info("Fingerprint: %s", " | ".join(parts))
+
         # --- Well-known paths ---
         eps, errs = await self._probe_well_known(state)
         endpoints.extend(eps)
         errors.extend(errs)
+
+        if eps:
+            logger.info("Well-known paths: %d hit", len(eps))
 
         # --- LLM analysis of collected recon data ---
         llm_findings = await self._llm_analyze_recon(state)

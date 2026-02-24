@@ -73,6 +73,13 @@ class PlannerAgent(BaseAgent):
             )
             state.scan_strategy = strategy
 
+            logger.info(
+                "Strategy: focus=[%s], skip=[%s], depth=%s",
+                ", ".join(strategy.focus_areas),
+                ", ".join(strategy.skip_agents) or "none",
+                strategy.scan_depth,
+            )
+
             detail_parts = []
             if strategy.focus_areas:
                 detail_parts.append(f"Focus: {', '.join(strategy.focus_areas)}")

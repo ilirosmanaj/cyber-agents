@@ -187,6 +187,11 @@ class JSAnalyzerAgent(BaseAgent):
         for eps in results:
             endpoints.extend(eps)
 
+        logger.info(
+            "JS fetch: %d analyzed, %d failed",
+            files_analyzed, fetch_failures,
+        )
+
         # LLM pass: analyze collected snippets for endpoints regex missed
         llm_endpoints, llm_findings, auth_patterns = await self._llm_analyze_snippets(
             all_snippets, extracted_paths
@@ -200,6 +205,7 @@ class JSAnalyzerAgent(BaseAgent):
                 state.tech_fingerprint.technologies.append(pattern)
 
         if extracted_paths:
+            logger.info("JS extraction: %d unique endpoints found", len(extracted_paths))
             findings.append(
                 Finding(
                     agent_name=self.name,
