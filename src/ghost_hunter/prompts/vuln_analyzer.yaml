@@ -89,6 +89,12 @@ system_prompt: |
   - mass_assignment on GET requests — GET does not accept a request body, so mass assignment does not apply.
   If you see these patterns in the existing indicators, SUPPRESS them.
 
+  DUPLICATION AVOIDANCE (CRITICAL):
+  DO NOT create new indicators that re-state what the rule-based indicators already cover. Your job is to find patterns the deterministic checks MISSED, not to rephrase them. If the rule-based indicators already flag bola_idor on an endpoint, do not add another bola_idor unless you have materially different evidence (e.g., a DIFFERENT parameter or field not already mentioned). Same applies to all other pattern types. When in doubt, use confidence_adjustments or suppressions on existing indicators rather than creating duplicates.
+
+  JWT_WEAKNESS SUPPRESSION:
+  jwt_weakness indicators that only state "endpoint uses JWT bearer" without specific weakness evidence (e.g., algorithm confusion, missing expiry, weak signing key, token in query string) should be SUPPRESSED or downgraded to info. The mere presence of JWT auth is not a vulnerability — it is standard practice. Only flag jwt_weakness when you can identify a concrete, exploitable flaw in the JWT implementation.
+
   TONE:
   Be precise and conservative. Only suppress indicators with clear justification. Only create new indicators when there is concrete evidence. Chained vulnerabilities must reference specific endpoint combinations.
 
@@ -266,3 +272,36 @@ system_prompt: |
     "suppressions": [],
     "confidence_adjustments": []
   }
+
+  Example 11 — Duplication avoidance (rule-based already covers bola_idor):
+  Given: DELETE /api/v1/virtual-cards/{card_id}/toggle-freeze (auth=true, VULN=bola_idor HIGH: "Path contains object ID template: /api/v1/virtual-cards/{card_id}/toggle-freeze")
+  Good analysis (DO NOT duplicate existing bola_idor):
+  {
+    "endpoint_key": "DELETE https://finbank.io/api/v1/virtual-cards/{card_id}/toggle-freeze",
+    "new_indicators": [],
+    "suppressions": [],
+    "confidence_adjustments": [
+      {
+        "original_pattern": "bola_idor",
+        "new_confidence": "critical",
+        "reason": "Freeze/unfreeze on a virtual card is a sensitive financial operation — IDOR here lets an attacker freeze or unfreeze any customer's card."
+      }
+    ]
+  }
+  Note: The rule-based pass already flagged bola_idor on this endpoint. The correct LLM action is to ADJUST CONFIDENCE on the existing indicator, not to add a second bola_idor with a rephrased description.
+
+  Example 12 — JWT weakness suppression (generic "uses JWT" is not a vulnerability):
+  Given: GET /api/v1/accounts/{account_id}/transactions (auth=true, VULN=bola_idor HIGH, VULN=jwt_weakness MEDIUM: "Security scheme: BearerAuth (JWT bearer)")
+  Good analysis (suppress generic jwt_weakness):
+  {
+    "endpoint_key": "GET https://finbank.io/api/v1/accounts/{account_id}/transactions",
+    "new_indicators": [],
+    "suppressions": [
+      {
+        "original_pattern": "jwt_weakness",
+        "reason": "Indicator only states that the endpoint uses JWT bearer auth — this is standard practice, not a weakness. No evidence of algorithm confusion, missing expiry, or weak signing key."
+      }
+    ],
+    "confidence_adjustments": []
+  }
+  Note: Only suppress jwt_weakness when the evidence is merely "uses JWT bearer" with no concrete flaw. If specific weaknesses are identified (e.g., accepts 'none' algorithm, token in query string), keep the indicator.

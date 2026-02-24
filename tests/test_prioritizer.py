@@ -6,6 +6,7 @@ from src.ghost_hunter.agents.prioritizer import (
     _deterministic_risk,
     _format_ep_line,
     _highest_severity,
+    _is_metadata_path,
 )
 from src.ghost_hunter.models import (
     EndpointCategory,
@@ -251,3 +252,38 @@ class TestFallbackEntry:
         entry = PrioritizerAgent._fallback_entry(state=state, key=key, ep=ep)
         assert entry.risk_level != RiskLevel.CRITICAL
         assert len(entry.vuln_indicators) == 0
+
+
+# ---------------------------------------------------------------------------
+# _is_metadata_path
+# ---------------------------------------------------------------------------
+
+
+class TestIsMetadataPath:
+    def test_catches_iam_credentials_path(self):
+        assert _is_metadata_path("https://vulnbank.org/latest/meta-data/iam/security-credentials/") is True
+
+    def test_catches_api_token_path(self):
+        assert _is_metadata_path("https://vulnbank.org/latest/api/token") is True
+
+    def test_ignores_normal_api(self):
+        assert _is_metadata_path("https://vulnbank.org/api/v1/users") is False
+
+    def test_meta_data_mid_path_doesnt_match(self):
+        """Only prefix matches count — /api/latest/meta-data is a real path."""
+        assert _is_metadata_path("https://vulnbank.org/api/latest/meta-data") is False
+
+    def test_filtering_keeps_real_endpoints(self):
+        """Simulates the prioritizer filter: metadata gone, real endpoints kept."""
+        real_ep = make_endpoint(url="https://vulnbank.org/api/v1/users")
+        meta_ep = make_endpoint(url="https://vulnbank.org/latest/meta-data/iam/security-credentials/")
+        state = ScanState(target="vulnbank.org", base_url="https://vulnbank.org")
+        state.add_endpoint(real_ep)
+        state.add_endpoint(meta_ep)
+
+        filtered = [
+            (k, ep) for k, ep in state.endpoints.items()
+            if not _is_metadata_path(ep.url)
+        ]
+        assert len(filtered) == 1
+        assert filtered[0][1].url == "https://vulnbank.org/api/v1/users"

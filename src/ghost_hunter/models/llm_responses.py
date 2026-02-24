@@ -201,7 +201,15 @@ class HTMLIntelAnalysisResponse(BaseModel):
 class ReconAnalysisResponse(BaseModel):
     reasoning: str = ""
     header_assessment: str = ""
-    tech_hypotheses: list[str] = Field(default_factory=list)
+    tech_hypotheses: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Concrete technology names or versions only (e.g., 'Flask 2.x', "
+            "'PostgreSQL', 'React', 'nginx reverse proxy'). Do NOT include "
+            "risk assessments, vulnerability descriptions, or authentication "
+            "flow descriptions."
+        ),
+    )
     interesting_patterns: list[str] = Field(default_factory=list)
     initial_attack_vectors: list[str] = Field(default_factory=list)
     confidence: float | None = None

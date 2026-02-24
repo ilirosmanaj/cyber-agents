@@ -19,11 +19,22 @@ system_prompt: |
      - Any unusual or custom headers that reveal internal architecture
 
   2. TECH HYPOTHESES
-     Based on all available signals (headers, cookie names, path patterns, response behavior), hypothesize the technology stack. Be specific:
+     Based on all available signals (headers, cookie names, path patterns, response behavior), hypothesize the technology stack. Each entry MUST be a concrete technology name or version (e.g., "Flask 2.x", "PostgreSQL", "React", "JWT authentication", "nginx reverse proxy"). Do NOT include risk assessments, vulnerability descriptions, or authentication flow descriptions — those belong in interesting_patterns or initial_attack_vectors, not here. Be specific:
      - "Express.js" not just "Node.js"
      - "Spring Boot 2.x" not just "Java"
      - Include auth mechanisms (JWT, session cookies, OAuth)
      - Include infrastructure hints (AWS, Cloudflare, nginx reverse proxy)
+
+     BAD (do NOT return these — they are risk assessments or descriptions, not technologies):
+       X "Unknown origin server technology (could be any stack)"
+       X "Potential for outdated or misconfigured web application"
+       X "Snippet 1: Basic authorization with client id and client secret"
+       X "Password flow with request body or Basic auth"
+     GOOD (concrete technology names):
+       ✓ "Cloudflare CDN/WAF"
+       ✓ "Flask 2.x"
+       ✓ "JWT authentication"
+       ✓ "OAuth 2.0"
 
   3. INTERESTING PATTERNS
      Flag anything unusual or noteworthy:

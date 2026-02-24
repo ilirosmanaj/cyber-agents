@@ -40,6 +40,23 @@ WELL_KNOWN_PATHS = [
 
 _MAX_BLOCKED_PATHS_IN_RECON = 20
 
+_REJECT_PHRASES = [
+    "unknown", "could be", "might be", "potential", "outdated",
+    "misconfigured", "snippet", "unclear", "risk", "vulnerable",
+]
+
+_MAX_TECH_NAME_LENGTH = 80  # longer entries are descriptions, not tech names
+
+
+def _is_concrete_technology(hypothesis: str) -> bool:
+    """Filter out vague LLM responses like 'Unknown origin server (could be any stack)'."""
+    lower = hypothesis.lower()
+    if any(phrase in lower for phrase in _REJECT_PHRASES):
+        return False
+    if len(hypothesis) > _MAX_TECH_NAME_LENGTH:
+        return False
+    return True
+
 
 @register_agent
 class PassiveReconAgent(BaseAgent):
@@ -352,9 +369,8 @@ class PassiveReconAgent(BaseAgent):
                 name="recon_analysis", max_tokens=1024,
             )
 
-            # write tech hypotheses to state
             for hypothesis in response.tech_hypotheses:
-                if hypothesis not in fp.technologies:
+                if _is_concrete_technology(hypothesis) and hypothesis not in fp.technologies:
                     fp.technologies.append(hypothesis)
 
             if response.header_assessment:

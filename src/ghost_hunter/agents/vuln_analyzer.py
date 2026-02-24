@@ -669,7 +669,7 @@ class VulnPatternAnalyzer(BaseAgent):
             if scheme.scheme_type == "http" and scheme.bearer_format.upper() == "JWT":
                 indicators.append(VulnIndicator(
                     pattern=VulnPattern.JWT_WEAKNESS,
-                    confidence=RiskLevel.MEDIUM,
+                    confidence=RiskLevel.INFO,
                     evidence=f"Security scheme: {scheme.scheme_name} (JWT bearer)",
                     description=(
                         f"JWT bearer auth (scheme: {scheme.scheme_name}) on "
@@ -780,13 +780,13 @@ class VulnPatternAnalyzer(BaseAgent):
             return []
 
         status = f" [{ep.status_code}]" if ep.status_code else ""
+        status_desc = f" returned HTTP {ep.status_code} —" if ep.status_code else " —"
         return [VulnIndicator(
             pattern=VulnPattern.INFO_DISCLOSURE,
             confidence=RiskLevel.HIGH,
             evidence=f"Accessible sensitive path: {ep.method} {path}{status}",
             description=(
-                f"Sensitive path {path} returned HTTP "
-                f"{ep.status_code or 'unknown'} — may expose internal "
+                f"Sensitive path {path}{status_desc} may expose internal "
                 f"configuration, debug info, or admin interfaces."
             ),
         )]
@@ -1320,13 +1320,14 @@ class VulnPatternAnalyzer(BaseAgent):
             if ep.status_code and ep.status_code >= 400:
                 continue
             status = f" [{ep.status_code}]" if ep.status_code else ""
+            status_desc = f" (HTTP {ep.status_code})" if ep.status_code else ""
             results.setdefault(key, []).append(VulnIndicator(
                 pattern=VulnPattern.BROKEN_FUNCTION_LEVEL_AUTH,
                 confidence=RiskLevel.CRITICAL,
                 evidence=f"Admin/debug path without auth: {ep.method} {path}{status}",
                 description=(
-                    f"Admin/debug path {path} is accessible without auth "
-                    f"(HTTP {ep.status_code or 'unknown'}). Could allow "
+                    f"Admin/debug path {path} is accessible without auth"
+                    f"{status_desc}. Could allow "
                     f"privilege escalation or access to operational data."
                 ),
             ))

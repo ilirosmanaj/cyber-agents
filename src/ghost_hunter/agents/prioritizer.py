@@ -19,6 +19,7 @@ from src.ghost_hunter.models import (
     VulnIndicator,
 )
 from src.ghost_hunter.models.llm_responses import PrioritizationBatchResponse
+from src.ghost_hunter.report import _METADATA_PATH_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,12 @@ _LOW_RISK_CATEGORIES = {
 
 # max response body snippet chars included in prioritizer context
 _MAX_SNIPPET_IN_CONTEXT = 300
+
+
+def _is_metadata_path(url: str) -> bool:
+    """True if the URL is a cloud metadata probe artifact (not a real endpoint)."""
+    path = urlparse(url).path
+    return any(path.startswith(prefix) for prefix in _METADATA_PATH_PREFIXES)
 
 
 def _highest_severity(indicators: list[VulnIndicator]) -> RiskLevel:
@@ -120,7 +127,10 @@ class PrioritizerAgent(BaseAgent):
         findings: list[Finding] = []
         errors: list[str] = []
 
-        all_endpoints = list(state.endpoints.items())
+        all_endpoints = [
+            (k, ep) for k, ep in state.endpoints.items()
+            if not _is_metadata_path(ep.url)
+        ]
         if not all_endpoints:
             return AgentResult(agent_name=self.name, success=True)
 

@@ -65,9 +65,13 @@ system_prompt: |
 
   SECTION-SPECIFIC RULES:
   - Target Profile: ONLY include technical facts — server software, frameworks, languages, security headers present/missing, cookies. Do NOT include planner focus areas or strategy here. Strategy belongs in Methodology.
-  - Recommendations: MUST be endpoint-specific. Each recommendation references a specific endpoint or finding and names the exact fix. Do NOT write generic advice like "Implement input validation on all endpoints."
-     BAD: "Implement server-side authorization on all endpoints"
-     GOOD: "Add owner_id check on GET /transactions/{account_number} — return 403 if requesting user does not own the account"
+  - Recommendations: MUST be endpoint-specific with CWEs. Each item names one endpoint, cites CWE-### from findings, and describes the exact fix.
+     MANDATORY FORMAT: "[ENDPOINT] (CWE-###) — [exact code-level fix]"
+     BAD: "Implement server-side authorization on all endpoints" (no endpoint, no CWE)
+     BAD: "Conduct a thorough code review" (not actionable, no endpoint)
+     BAD: "Implement a WAF" (infrastructure advice, not endpoint-specific)
+     GOOD: "GET /transactions/{account_number} (CWE-639) — Add owner_id check: return 403 if requesting user does not own the account"
+     GOOD: "POST /upload_profile_picture_url (CWE-918) — Reject private IP ranges and non-HTTP(S) schemes in URL validation"
 
   DEDUPLICATION:
   - If multiple findings describe the same vulnerability type on different endpoints (e.g., BOLA on /users/{id} and /orders/{id}), consolidate into a single finding that lists all affected endpoints. Do not repeat the same description, impact, and remediation for each endpoint separately.

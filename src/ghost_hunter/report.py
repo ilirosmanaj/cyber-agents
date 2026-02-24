@@ -29,6 +29,7 @@ _MAX_REPORT_TOKENS = 32768
 _SNIPPET_MAX_CHARS = 300
 # Info disclosure (e.g. debug console) often exposes secrets; show full response
 _SNIPPET_MAX_CHARS_INFO_DISCLOSURE = 8000
+_MAX_DETAIL_ENTRIES = 3
 
 CWE_REFERENCES: dict[str, str] = {
     "bola_idor": "CWE-639 (Authorization Bypass Through User-Controlled Key)",
@@ -458,7 +459,9 @@ def _build_section_instructions(state: ScanState) -> str:
     medium_low = severity_counts.get("MEDIUM", 0) + severity_counts.get("LOW", 0)
     if medium_low:
         lines.append(
-            f"6. ## Medium & Low Findings — Summarize {medium_low} remaining findings."
+            f"6. ## Medium & Low Findings — List EACH of the {medium_low} remaining "
+            f"findings as a bullet point with: endpoint URL, vulnerability type, "
+            f"and one-sentence description. Do not summarize into a single paragraph."
         )
 
     lines.extend([
@@ -466,8 +469,23 @@ def _build_section_instructions(state: ScanState) -> str:
         "The table will be auto-inserted.",
         "8. ## Vulnerability Pattern Analysis — Distribution, chained vulns, "
         "LLM-enhanced vs deterministic, suppressed false positives.",
-        "9. ## Recommendations — Prioritized roadmap: immediate (critical), "
-        "short-term (high), medium-term (medium).",
+        "9. ## Recommendations — For each priority tier (immediate/short-term/"
+        "medium-term), list 3-5 SPECIFIC action items.\n"
+        "MANDATORY FORMAT for each item:\n"
+        "  [ENDPOINT] (CWE-###) — [CONCRETE FIX]\n\n"
+        "EACH recommendation MUST:\n"
+        "  - Name a specific endpoint (e.g., GET /accounts/{id})\n"
+        "  - Reference the relevant CWE from findings above\n"
+        "  - Describe the exact code-level fix\n\n"
+        "WRONG (generic — do NOT write these):\n"
+        "  X 'Implement input validation on all endpoints'\n"
+        "  X 'Conduct a thorough code review'\n"
+        "  X 'Implement a Web Application Firewall (WAF)'\n\n"
+        "RIGHT (endpoint-specific with CWE):\n"
+        "  ✓ 'GET /transactions/{account_number} (CWE-639) — Add ownership check: "
+        "verify request.user_id == account.owner_id before returning data'\n"
+        "  ✓ 'POST /transfer (CWE-362) — Add idempotency key via X-Idempotency-Key "
+        "header and use SELECT ... FOR UPDATE on balance row'",
     ])
 
     return "\n".join(lines)
@@ -728,11 +746,22 @@ def _is_category_mismatch(f: Finding, state: ScanState) -> bool:
     return False
 
 
+def _is_metadata_probe(f: Finding, state: ScanState) -> bool:
+    """True if the finding's endpoint is a cloud metadata probe artifact."""
+    ep = _lookup_endpoint_from_finding(f, state)
+    if ep is None:
+        # fall back to checking the title for metadata paths
+        return any(prefix in f.title for prefix in _METADATA_PATH_PREFIXES)
+    path = urlparse(ep.url).path
+    return any(path.startswith(prefix) for prefix in _METADATA_PATH_PREFIXES)
+
+
 def _is_false_positive(f: Finding, state: ScanState) -> bool:
     return (
         _is_expected_behavior(f)
         or _is_category_mismatch(f, state)
         or _is_response_denial(f, state)
+        or _is_metadata_probe(f, state)
     )
 
 
@@ -816,7 +845,10 @@ def _format_finding_group(
     details = list(dict.fromkeys(f.detail for f in findings if f.detail))
     if details:
         lines.extend(("", "**Detail:**"))
-        lines.extend(_expand_endpoint_lists(details))
+        shown = details[:_MAX_DETAIL_ENTRIES]
+        lines.extend(_expand_endpoint_lists(shown))
+        if len(details) > _MAX_DETAIL_ENTRIES:
+            lines.append(f"*(... and {len(details) - _MAX_DETAIL_ENTRIES} more)*")
 
     evidences = list(dict.fromkeys(
         f.evidence for f in findings if f.evidence
