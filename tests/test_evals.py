@@ -197,7 +197,7 @@ async def test_prioritizer_eval(case):
 
 class TestScoring:
     def test_classification_accuracy_perfect(self):
-        """Given identical predictions and expectations, accuracy should be 1.0."""
+        """Perfect predictions → 1.0 accuracy."""
         expected = {"a": ("rest_api", True), "b": ("auth_endpoint", False)}
         predicted = {"a": ("rest_api", True), "b": ("auth_endpoint", False)}
         assert classification_accuracy(predicted, expected) == 1.0
@@ -213,7 +213,7 @@ class TestScoring:
         assert classification_accuracy({}, {}) == 1.0
 
     def test_vuln_precision_recall_perfect(self):
-        """Identical predicted and expected sets give perfect precision, recall, F1."""
+        """All vulns matched exactly → P/R/F1 all 1.0."""
         items = ["bola_idor GET /a", "ssrf POST /b"]
         p, r, f1 = vuln_precision_recall(items, items)
         assert p == 1.0 and r == 1.0 and f1 == 1.0
@@ -232,7 +232,7 @@ class TestScoring:
         assert p == 1.0 and r == 1.0 and f1 == 1.0
 
     def test_risk_rank_correlation_perfect(self):
-        """Same ordering in both lists gives correlation 1.0."""
+        """Identical ordering → correlation 1.0."""
         items = ["a", "b", "c"]
         assert risk_rank_correlation(items, items) == 1.0
 

@@ -117,6 +117,8 @@ ipython_config.py
 .pdm-python
 .pdm-build/
 
+claude_description/
+cursor_description/
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 #pixi.lock
@@ -208,3 +210,4 @@ __marimo__/
 
 # Ghost Hunter scan outputs
 outputs/
+.DS_Store

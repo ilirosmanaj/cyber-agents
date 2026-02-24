@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from src.ghost_hunter.agents.vuln_analyzer import VulnPatternAnalyzer, _SEVERITY_ORDER
 from src.ghost_hunter.models import (
@@ -461,7 +462,6 @@ class TestResponseBodyLeaks:
         )
 
 
-
 # ---------------------------------------------------------------------------
 # File upload detection
 # ---------------------------------------------------------------------------
@@ -872,7 +872,7 @@ class TestBodyAnalysisFiltering:
     """Tests for _select_endpoints_for_body_analysis."""
 
     def test_debug_endpoint_selected(self, scan_state: ScanState):
-        """Endpoint with debug_endpoint category is selected for body analysis."""
+        """Debug console pages should get their bodies analyzed."""
         ep = make_endpoint(
             url="https://vulnbank.org/debug/console",
             category=EndpointCategory.DEBUG_ENDPOINT,
@@ -884,7 +884,7 @@ class TestBodyAnalysisFiltering:
         assert selected[0][1] is ep
 
     def test_admin_with_broken_auth_selected(self, scan_state: ScanState):
-        """Endpoint with broken_function_level_auth indicator is selected."""
+        """broken_function_level_auth flag should trigger body analysis."""
         ep = make_endpoint(
             url="https://vulnbank.org/admin/settings",
             response_body_snippet='{"admin": true, "config": "..."}',
@@ -903,7 +903,7 @@ class TestBodyAnalysisFiltering:
         assert len(selected) == 1
 
     def test_info_disclosure_endpoint_selected(self, scan_state: ScanState):
-        """Endpoint with info_disclosure indicator is selected."""
+        """info_disclosure flag also triggers body analysis."""
         ep = make_endpoint(
             url="https://vulnbank.org/debug",
             response_body_snippet="Stack trace here",
@@ -960,7 +960,7 @@ class TestBodyAnalysisProcessing:
         )
 
     def test_secret_finding_creates_indicator(self, scan_state: ScanState):
-        """A secret finding from LLM creates a VulnIndicator with correct pattern."""
+        """LLM finding of type 'secret' → INFO_DISCLOSURE indicator at CRITICAL."""
         analyzer = self._make_analyzer()
         ep = make_endpoint(url="https://vulnbank.org/debug/console")
         scan_state.add_endpoint(ep)
@@ -989,7 +989,7 @@ class TestBodyAnalysisProcessing:
         assert indicators[0].llm_enhanced is True
 
     def test_placeholder_finding_skipped(self, scan_state: ScanState):
-        """A finding with is_placeholder=True is not added."""
+        """'changeme' is not a real secret — is_placeholder should suppress it."""
         analyzer = self._make_analyzer()
         ep = make_endpoint(url="https://vulnbank.org/docs/config")
         scan_state.add_endpoint(ep)
@@ -1014,7 +1014,7 @@ class TestBodyAnalysisProcessing:
         assert key not in scan_state.vuln_indicators
 
     def test_credential_finding_maps_to_excessive_data(self, scan_state: ScanState):
-        """A credential finding maps to EXCESSIVE_DATA_EXPOSURE pattern."""
+        """Credentials (DB URLs, passwords) use EXCESSIVE_DATA_EXPOSURE, not INFO_DISCLOSURE."""
         analyzer = self._make_analyzer()
         ep = make_endpoint(url="https://vulnbank.org/debug/env")
         scan_state.add_endpoint(ep)
@@ -1063,7 +1063,6 @@ class TestBodyAnalysisProcessing:
             ),
         ]
 
-        import asyncio
         count = asyncio.get_event_loop().run_until_complete(
             analyzer._body_analysis_pass(scan_state)
         )

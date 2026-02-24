@@ -41,6 +41,8 @@ _BODY_ANALYSIS_BATCH_SIZE = 4
 # caps for LLM context windows — keep prompts under token limits
 _MAX_SUMMARY_ENDPOINTS = 100
 _MAX_RESPONSE_FIELDS_PER_ENDPOINT = 25
+_MAX_BODY_SNIPPET_CHARS = 4000
+_MIN_SUBSTANTIAL_BODY_LENGTH = 200
 
 # severity ordering for comparison — lower index = higher severity
 _SEVERITY_ORDER = {level: idx for idx, level in enumerate(RiskLevel)}
@@ -95,9 +97,8 @@ _RACE_PATHS = re.compile(
     re.IGNORECASE,
 )
 
-# categories where certain vuln checks produce false positives
-_AUTH_SAFE_CATEGORIES = {EndpointCategory.AUTH_ENDPOINT}
-_INJECTION_SKIP_CATEGORIES = {EndpointCategory.AUTH_ENDPOINT}
+# auth endpoints produce false positives for BOLA, auth boundary, and injection checks
+_SKIP_VULN_CATEGORIES = {EndpointCategory.AUTH_ENDPOINT}
 
 # Prompt injection: AI-related paths and params
 _AI_PATHS = re.compile(
@@ -481,12 +482,11 @@ class VulnPatternAnalyzer(BaseAgent):
 
     @staticmethod
     def _check_bola_idor(ep: Endpoint) -> list[VulnIndicator]:
-        indicators: list[VulnIndicator] = []
-        path = urlparse(ep.url).path
-
-        if ep.category in _AUTH_SAFE_CATEGORIES:
+        if ep.category in _SKIP_VULN_CATEGORIES:
             return []
 
+        indicators: list[VulnIndicator] = []
+        path = urlparse(ep.url).path
         match = _IDOR_PATH_PARAM.search(path)
         if match:
             param = match.group(0).strip("{}")
@@ -795,7 +795,7 @@ class VulnPatternAnalyzer(BaseAgent):
     def _check_auth_boundary(ep: Endpoint) -> list[VulnIndicator]:
         if ep.requires_auth is not False:
             return []
-        if ep.category in _AUTH_SAFE_CATEGORIES:
+        if ep.category in _SKIP_VULN_CATEGORIES:
             return []
         path = urlparse(ep.url).path
         path_lower = path.lower()
@@ -912,17 +912,17 @@ class VulnPatternAnalyzer(BaseAgent):
     @staticmethod
     def _check_injection_surfaces(ep: Endpoint) -> list[VulnIndicator]:
         """Detect params that suggest SQL injection, path traversal, or command injection."""
-        indicators: list[VulnIndicator] = []
+        if ep.category in _SKIP_VULN_CATEGORIES:
+            return []
+
         path = urlparse(ep.url).path
 
-        # AI endpoints are handled by _check_prompt_injection — their params
-        # (message, query, input, etc.) overlap with injection sets but the
-        # risk is prompt injection, not OS/SQL injection.
+        # AI endpoints accept free-text input that overlaps with injection param
+        # names, but the actual risk is prompt injection, not OS/SQL injection.
         if _AI_PATHS.search(path):
             return []
-        if ep.category in _INJECTION_SKIP_CATEGORIES:
-            return []
 
+        indicators: list[VulnIndicator] = []
         params = _collect_param_names(ep)
 
         sql_params = params & _SQL_INJECTION_PARAMS
@@ -1000,7 +1000,7 @@ class VulnPatternAnalyzer(BaseAgent):
                 EndpointCategory.ADMIN_ENDPOINT,
             )
             has_substantial_body = (
-                len(ep.response_body_snippet) > 200
+                len(ep.response_body_snippet) > _MIN_SUBSTANTIAL_BODY_LENGTH
                 and ep.status_code == 200
             )
 
@@ -1048,7 +1048,7 @@ class VulnPatternAnalyzer(BaseAgent):
         """Format response body snippets for the body analysis LLM."""
         lines: list[str] = []
         for key, ep in batch:
-            snippet = ep.response_body_snippet[:4000]
+            snippet = ep.response_body_snippet[:_MAX_BODY_SNIPPET_CHARS]
             lines.append(
                 f"--- {key} ---\n"
                 f"Status: {ep.status_code}\n"

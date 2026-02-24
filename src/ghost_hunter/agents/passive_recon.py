@@ -38,7 +38,6 @@ WELL_KNOWN_PATHS = [
     "/humans.txt",
 ]
 
-# max blocked paths to include in LLM recon context
 _MAX_BLOCKED_PATHS_IN_RECON = 20
 
 

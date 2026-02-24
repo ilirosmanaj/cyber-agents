@@ -711,7 +711,6 @@ def _is_response_denial(f: Finding, state: ScanState) -> bool:
     return any(phrase in snippet_lower for phrase in _DENIAL_PHRASES)
 
 
-# vuln patterns that don't apply to auth endpoints (login, register, token, etc.)
 _AUTH_ENDPOINT_FALSE_POSITIVE_TYPES = {
     "auth_boundary_gap", "vuln_auth_boundary_gap",
     "bola_idor", "vuln_bola_idor",

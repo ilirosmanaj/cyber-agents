@@ -172,7 +172,6 @@ system_prompt: |
         "is_placeholder": true
       }
     ],
-    "source_url": "GET https://taskflow.dev/docs/getting-started",
     "confidence": 0.9
   }
 
@@ -224,7 +223,6 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://cloudvault.net/internal/service-config",
     "confidence": 0.95
   }
 
@@ -247,7 +245,6 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://learnhub.edu/api/debug/certificates",
     "confidence": 0.95
   }
 
@@ -293,7 +290,6 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://travelwise.app/debug/env",
     "confidence": 0.95
   }
 
@@ -332,7 +328,6 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://devhub.tools/actuator/configprops",
     "confidence": 0.95
   }
 
@@ -371,7 +366,6 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://streamline.ai/actuator/env",
     "confidence": 0.95
   }
 
@@ -448,6 +442,5 @@ system_prompt: |
         "is_placeholder": false
       }
     ],
-    "source_url": "GET https://quickbite.delivery/api/debug/config",
     "confidence": 0.92
   }

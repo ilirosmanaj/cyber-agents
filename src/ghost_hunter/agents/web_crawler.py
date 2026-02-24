@@ -32,6 +32,12 @@ _SHALLOW_DEPTH_RATIO = 0.5
 _DEEP_PAGES_RATIO = 2.0
 _DEEP_DEPTH_RATIO = 1.5
 
+# caps for HTML content sent to LLM
+_MAX_INTEL_CONTENT_CHARS = 4000
+_MAX_COMMENTS_PER_PAGE = 20
+_MAX_SCRIPTS_PER_PAGE = 10
+_MAX_SCRIPT_CHARS = 2000
+
 # patterns for detecting API hints inside inline scripts and data-* attributes
 _API_HINT_PATTERN = re.compile(
     r"""(?:/api/|/graphql|/swagger|/openapi|/rest/)""", re.IGNORECASE
@@ -390,12 +396,7 @@ class WebCrawlerAgent(BaseAgent):
 
     @staticmethod
     def _collect_html_intel_content(soup: BeautifulSoup) -> str:
-        """Extract security-relevant HTML content for LLM analysis.
-
-        Collects HTML comments and inline script content — the parts most
-        likely to contain secrets, debug flags, or developer notes that
-        regex-based detection would miss.
-        """
+        """Extract HTML comments and inline scripts for LLM analysis."""
         parts: list[str] = []
 
         comments = [
@@ -404,18 +405,18 @@ class WebCrawlerAgent(BaseAgent):
             if len(str(c).strip()) > 3
         ]
         if comments:
-            parts.append("HTML COMMENTS:\n" + "\n".join(comments[:20]))
+            parts.append("HTML COMMENTS:\n" + "\n".join(comments[:_MAX_COMMENTS_PER_PAGE]))
 
         scripts: list[str] = []
         for script in soup.find_all("script", src=False):
             text = (script.string or "").strip()
             if text and len(text) > 10:
-                scripts.append(text[:2000])
+                scripts.append(text[:_MAX_SCRIPT_CHARS])
         if scripts:
-            parts.append("INLINE SCRIPTS:\n" + "\n---\n".join(scripts[:10]))
+            parts.append("INLINE SCRIPTS:\n" + "\n---\n".join(scripts[:_MAX_SCRIPTS_PER_PAGE]))
 
         content = "\n\n".join(parts)
-        return content[:4000] if content else ""
+        return content[:_MAX_INTEL_CONTENT_CHARS] if content else ""
 
     async def _llm_html_intel_pass(
         self, candidates: dict[str, str]
@@ -479,13 +480,12 @@ class WebCrawlerAgent(BaseAgent):
             if finding.is_placeholder:
                 continue
 
-            severity = self._FINDING_SEVERITY_MAP.get(
-                finding.finding_type, RiskLevel.MEDIUM
-            )
             try:
                 severity = RiskLevel(finding.confidence)
             except ValueError:
-                pass
+                severity = self._FINDING_SEVERITY_MAP.get(
+                    finding.finding_type, RiskLevel.MEDIUM
+                )
 
             page_path = self._resolve_finding_path(
                 source_url=finding.source_url, batch_urls=batch_urls,
