@@ -1,4 +1,4 @@
-"""Async BFS web crawler with link, form, and script extraction."""
+"""Async BFS web crawler with link, form, script extraction, and LLM HTML analysis."""
 
 from __future__ import annotations
 
@@ -20,10 +20,17 @@ from src.ghost_hunter.models import (
     RiskLevel,
     ScanState,
 )
+from src.ghost_hunter.models.llm_responses import HTMLIntelAnalysisResponse
 
 logger = logging.getLogger(__name__)
 
 _HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+
+# scan_depth multipliers for max_pages and max_crawl_depth
+_SHALLOW_PAGES_RATIO = 0.25
+_SHALLOW_DEPTH_RATIO = 0.5
+_DEEP_PAGES_RATIO = 2.0
+_DEEP_DEPTH_RATIO = 1.5
 
 # patterns for detecting API hints inside inline scripts and data-* attributes
 _API_HINT_PATTERN = re.compile(
@@ -58,18 +65,7 @@ class WebCrawlerAgent(BaseAgent):
     name = "web_crawler"
     description = "BFS crawls the target, extracting links, forms, and script URLs."
 
-    _COMMENT_KEYWORDS = re.compile(
-        r"(?:todo|fixme|hack|password|secret|api[_-]?key|token|debug|admin|internal)",
-        re.IGNORECASE,
-    )
-    _LEAKED_SECRET_PATTERN = re.compile(
-        r"""(?:api[_-]?key|secret|token|password|passwd|credential)\s*[=:]\s*['"]?[^\s'"]{8,}""",
-        re.IGNORECASE,
-    )
-    _DEBUG_PATTERN = re.compile(
-        r"(?:django\.debug|flask\.debug|DEBUG\s*=\s*True|traceback|stacktrace|Traceback \(most recent)",
-        re.IGNORECASE,
-    )
+    _HTML_INTEL_BATCH_SIZE = 4
 
     async def run(self, state: ScanState) -> AgentResult:
         endpoints: list[Endpoint] = []
@@ -85,6 +81,7 @@ class WebCrawlerAgent(BaseAgent):
         pages_crawled = 0
         forms_found = 0
         seen_forms: set[str] = set()
+        html_intel_candidates: dict[str, str] = {}  # page_url -> extracted content
 
         # compute effective limits from scan_depth strategy
         max_pages = settings.max_pages
@@ -92,11 +89,11 @@ class WebCrawlerAgent(BaseAgent):
         if state.scan_strategy and state.scan_strategy.scan_depth:
             depth_setting = state.scan_strategy.scan_depth
             if depth_setting == "shallow":
-                max_pages = max(1, int(settings.max_pages * 0.25))
-                max_depth = max(1, int(settings.max_crawl_depth * 0.5))
+                max_pages = max(1, int(settings.max_pages * _SHALLOW_PAGES_RATIO))
+                max_depth = max(1, int(settings.max_crawl_depth * _SHALLOW_DEPTH_RATIO))
             elif depth_setting == "deep":
-                max_pages = int(settings.max_pages * 2)
-                max_depth = int(settings.max_crawl_depth * 1.5)
+                max_pages = int(settings.max_pages * _DEEP_PAGES_RATIO)
+                max_depth = int(settings.max_crawl_depth * _DEEP_DEPTH_RATIO)
 
         while not queue.empty() and pages_crawled < max_pages:
             url, depth = queue.get_nowait()
@@ -161,12 +158,20 @@ class WebCrawlerAgent(BaseAgent):
 
             self._extract_additional_urls(soup, base_href, depth, queue, state)
 
-            findings.extend(self._extract_html_intelligence(soup, normalized))
+            intel_content = self._collect_html_intel_content(soup)
+            if intel_content:
+                html_intel_candidates[normalized] = intel_content
             findings.extend(self._extract_api_hints(soup, normalized))
 
             for name, value in resp.headers.items():
                 if name.lower() in _INTERESTING_HEADERS:
                     page_ep.response_headers[name.lower()] = value
+
+        if html_intel_candidates:
+            logger.info("LLM HTML analysis on %d pages", len(html_intel_candidates))
+            intel_findings = await self._llm_html_intel_pass(html_intel_candidates)
+            findings.extend(intel_findings)
+            logger.info("LLM HTML analysis found %d findings", len(intel_findings))
 
         if pages_crawled > 0:
             findings.append(
@@ -373,44 +378,124 @@ class WebCrawlerAgent(BaseAgent):
 
         return findings
 
-    def _extract_html_intelligence(
-        self, soup: BeautifulSoup, page_url: str
+    # ------------------------------------------------------------------
+    # LLM HTML intelligence analysis
+    # ------------------------------------------------------------------
+
+    _FINDING_SEVERITY_MAP: dict[str, RiskLevel] = {
+        "leaked_secret": RiskLevel.HIGH,
+        "sensitive_comment": RiskLevel.LOW,
+        "debug_indicator": RiskLevel.MEDIUM,
+    }
+
+    @staticmethod
+    def _collect_html_intel_content(soup: BeautifulSoup) -> str:
+        """Extract security-relevant HTML content for LLM analysis.
+
+        Collects HTML comments and inline script content — the parts most
+        likely to contain secrets, debug flags, or developer notes that
+        regex-based detection would miss.
+        """
+        parts: list[str] = []
+
+        comments = [
+            str(c).strip()
+            for c in soup.find_all(string=lambda text: isinstance(text, Comment))
+            if len(str(c).strip()) > 3
+        ]
+        if comments:
+            parts.append("HTML COMMENTS:\n" + "\n".join(comments[:20]))
+
+        scripts: list[str] = []
+        for script in soup.find_all("script", src=False):
+            text = (script.string or "").strip()
+            if text and len(text) > 10:
+                scripts.append(text[:2000])
+        if scripts:
+            parts.append("INLINE SCRIPTS:\n" + "\n---\n".join(scripts[:10]))
+
+        content = "\n\n".join(parts)
+        return content[:4000] if content else ""
+
+    async def _llm_html_intel_pass(
+        self, candidates: dict[str, str]
     ) -> list[Finding]:
-        """Analyze already-fetched HTML for leaked secrets, comments, and debug indicators."""
+        """Batch-analyze collected HTML content with the LLM."""
         findings: list[Finding] = []
-        path = urlparse(page_url).path
-        raw_html = str(soup)
+        items = list(candidates.items())
 
-        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
-            if not self._COMMENT_KEYWORDS.search(str(comment)):
+        for i in range(0, len(items), self._HTML_INTEL_BATCH_SIZE):
+            batch = items[i : i + self._HTML_INTEL_BATCH_SIZE]
+            try:
+                batch_context = self._format_html_intel_batch(batch)
+                messages = [
+                    {
+                        "role": "system",
+                        "content": self.prompt_registry.get(
+                            "crawler_html_analyzer"
+                        ).system_prompt,
+                    },
+                    {"role": "user", "content": batch_context},
+                ]
+                response = await self.llm.chat_structured(
+                    messages,
+                    response_model=HTMLIntelAnalysisResponse,
+                    name=f"html_intel_batch_{i // self._HTML_INTEL_BATCH_SIZE}",
+                )
+                findings.extend(
+                    self._process_html_intel_results(response, batch)
+                )
+            except Exception as e:
+                logger.warning(
+                    "HTML intel batch %d failed: %s",
+                    i // self._HTML_INTEL_BATCH_SIZE,
+                    e,
+                )
                 continue
-            findings.append(Finding(
-                agent_name=self.name,
-                finding_type="html_comment_leak",
-                title=f"Sensitive HTML comment on {path}",
-                detail="Comment contains sensitive keyword",
-                severity=RiskLevel.LOW,
-                evidence=str(comment).strip()[:120],
-            ))
-
-        for match in self._LEAKED_SECRET_PATTERN.finditer(raw_html):
-            findings.append(Finding(
-                agent_name=self.name,
-                finding_type="leaked_secret",
-                title=f"Potential secret leak on {path}",
-                detail="Credential or API key pattern detected in page source",
-                severity=RiskLevel.HIGH,
-                evidence=match.group(0)[:100],
-            ))
-
-        for match in self._DEBUG_PATTERN.finditer(raw_html):
-            findings.append(Finding(
-                agent_name=self.name,
-                finding_type="debug_indicator",
-                title=f"Debug indicator on {path}",
-                detail="Framework debug mode or stack trace pattern detected",
-                severity=RiskLevel.MEDIUM,
-                evidence=match.group(0)[:100],
-            ))
 
         return findings
+
+    @staticmethod
+    def _format_html_intel_batch(
+        batch: list[tuple[str, str]],
+    ) -> str:
+        """Format HTML content for the LLM."""
+        lines: list[str] = []
+        for page_url, content in batch:
+            path = urlparse(page_url).path
+            lines.append(f"--- {path} ({page_url}) ---\n{content}\n")
+        return "\n".join(lines)
+
+    def _process_html_intel_results(
+        self,
+        response: HTMLIntelAnalysisResponse,
+        batch: list[tuple[str, str]],
+    ) -> list[Finding]:
+        """Convert LLM findings into Finding objects."""
+        results: list[Finding] = []
+        # use the first page in the batch for the path in the finding title
+        first_path = urlparse(batch[0][0]).path if batch else "/"
+
+        for finding in response.findings:
+            if finding.is_placeholder:
+                continue
+
+            severity = self._FINDING_SEVERITY_MAP.get(
+                finding.finding_type, RiskLevel.MEDIUM
+            )
+            # override severity with LLM confidence if it maps to a RiskLevel
+            try:
+                severity = RiskLevel(finding.confidence)
+            except ValueError:
+                pass
+
+            results.append(Finding(
+                agent_name=self.name,
+                finding_type=finding.finding_type,
+                title=f"{finding.finding_type.replace('_', ' ').title()} on {first_path}",
+                detail=finding.context,
+                severity=severity,
+                evidence=finding.evidence[:120],
+            ))
+
+        return results

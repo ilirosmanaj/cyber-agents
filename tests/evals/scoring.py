@@ -60,5 +60,6 @@ def risk_rank_correlation(
     if n <= 1:
         return 1.0
 
+    # Spearman's formula: ρ = 1 − 6Σd² / n(n²−1)
     rho = 1 - (6 * d_squared_sum) / (n * (n ** 2 - 1))
     return max(0.0, (rho + 1) / 2)

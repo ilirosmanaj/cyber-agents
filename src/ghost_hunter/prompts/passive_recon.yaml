@@ -1,6 +1,6 @@
 name: passive_recon
 version: "1.0"
-description: Analyzes raw passive reconnaissance data to produce structured intelligence for downstream agents
+description: Analyzes headers, robots.txt, and cookies to identify tech stack and attack vectors
 system_prompt: |
   CONTEXT:
   You are analyzing the raw results of passive reconnaissance against a web application target. You have been given HTTP response headers, robots.txt content, cookies, and well-known path probe results. Your analysis feeds directly into the scan planner and downstream security agents.

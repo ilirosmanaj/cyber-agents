@@ -1,8 +1,10 @@
-"""VulnPatternAnalyzer — two-pass vulnerability pattern detection.
+"""VulnPatternAnalyzer — multi-pass vulnerability pattern detection.
 
-Pass 1: Deterministic regex/set checks — fast, testable, catches obvious patterns.
-Pass 2: LLM batched analysis — semantic variants, chained vulnerabilities,
-        false positive suppression, confidence refinement, context-specific descriptions.
+Pass 1:   Deterministic regex/set checks — fast, testable, catches obvious patterns.
+Pass 1.5: LLM response body analysis — semantic secret/credential detection on
+          flagged endpoints (debug, admin, info_disclosure).
+Pass 2:   LLM batched analysis — semantic variants, chained vulnerabilities,
+          false positive suppression, confidence refinement, context-specific descriptions.
 
 Runs after Classifier, before Prioritizer.
 """
@@ -20,17 +22,22 @@ from src.ghost_hunter.config import settings
 from src.ghost_hunter.models import (
     AgentResult,
     Endpoint,
+    EndpointCategory,
     Finding,
     RiskLevel,
     ScanState,
     VulnIndicator,
     VulnPattern,
 )
-from src.ghost_hunter.models.llm_responses import VulnAnalysisBatchResponse
+from src.ghost_hunter.models.llm_responses import (
+    ResponseBodyAnalysisResponse,
+    VulnAnalysisBatchResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 LLM_VULN_BATCH_SIZE = 8
+_BODY_ANALYSIS_BATCH_SIZE = 4
 # caps for LLM context windows — keep prompts under token limits
 _MAX_SUMMARY_ENDPOINTS = 100
 _MAX_RESPONSE_FIELDS_PER_ENDPOINT = 25
@@ -304,6 +311,10 @@ class VulnPatternAnalyzer(BaseAgent):
         pass1_count += self._merge_cross_endpoint(state, self._check_version_confusion(all_endpoints))
         pass1_count += self._merge_cross_endpoint(state, self._check_broken_function_auth(all_endpoints))
         logger.info("Pass 1 complete: %d indicators found", pass1_count)
+
+        logger.info("Pass 1.5: LLM response body analysis on flagged endpoints")
+        pass15_count = await self._body_analysis_pass(state)
+        logger.info("Pass 1.5 complete: %d body findings", pass15_count)
 
         logger.info("Pass 2: LLM analysis for semantic variants, chains, and refinement")
         pass2_count = await self._llm_analysis_pass(state)
@@ -939,6 +950,137 @@ class VulnPatternAnalyzer(BaseAgent):
             ))
 
         return indicators
+
+    # ------------------------------------------------------------------
+    # Pass 1.5: LLM response body analysis
+    # ------------------------------------------------------------------
+
+    _BODY_FINDING_TYPE_MAP: dict[str, VulnPattern] = {
+        "secret": VulnPattern.INFO_DISCLOSURE,
+        "config_leak": VulnPattern.INFO_DISCLOSURE,
+        "debug_info": VulnPattern.INFO_DISCLOSURE,
+        "credential": VulnPattern.EXCESSIVE_DATA_EXPOSURE,
+    }
+
+    @staticmethod
+    def _select_endpoints_for_body_analysis(
+        state: ScanState,
+    ) -> list[tuple[str, Endpoint]]:
+        """Select endpoints whose response bodies are worth sending to the LLM."""
+        selected: list[tuple[str, Endpoint]] = []
+        for key, ep in state.endpoints.items():
+            if not ep.response_body_snippet:
+                continue
+
+            indicators = state.vuln_indicators.get(key, [])
+            has_flag = any(
+                ind.pattern in (VulnPattern.INFO_DISCLOSURE, VulnPattern.BROKEN_FUNCTION_LEVEL_AUTH)
+                for ind in indicators
+            )
+            is_debug_or_admin = ep.category in (
+                EndpointCategory.DEBUG_ENDPOINT,
+                EndpointCategory.ADMIN_ENDPOINT,
+            )
+            has_substantial_body = (
+                len(ep.response_body_snippet) > 200
+                and ep.status_code == 200
+            )
+
+            if has_flag or is_debug_or_admin or has_substantial_body:
+                selected.append((key, ep))
+
+        return selected
+
+    async def _body_analysis_pass(self, state: ScanState) -> int:
+        """Run LLM analysis on response bodies of flagged endpoints."""
+        candidates = self._select_endpoints_for_body_analysis(state)
+        if not candidates:
+            return 0
+
+        total = 0
+        for i in range(0, len(candidates), _BODY_ANALYSIS_BATCH_SIZE):
+            batch = candidates[i : i + _BODY_ANALYSIS_BATCH_SIZE]
+            try:
+                body_context = self._format_body_batch(batch)
+                messages = [
+                    {
+                        "role": "system",
+                        "content": self.prompt_registry.get("vuln_body_analyzer").system_prompt,
+                    },
+                    {"role": "user", "content": body_context},
+                ]
+                response = await self.llm.chat_structured(
+                    messages,
+                    response_model=ResponseBodyAnalysisResponse,
+                    name=f"vuln_body_batch_{i // _BODY_ANALYSIS_BATCH_SIZE}",
+                )
+                total += self._process_body_analysis_results(state, response, batch)
+            except Exception as e:
+                logger.warning(
+                    "Body analysis batch %d failed (Pass 1 results intact): %s",
+                    i // _BODY_ANALYSIS_BATCH_SIZE,
+                    e,
+                )
+                continue
+
+        return total
+
+    @staticmethod
+    def _format_body_batch(batch: list[tuple[str, Endpoint]]) -> str:
+        """Format response body snippets for the body analysis LLM."""
+        lines: list[str] = []
+        for key, ep in batch:
+            snippet = ep.response_body_snippet[:4000]
+            lines.append(
+                f"--- {key} ---\n"
+                f"Status: {ep.status_code}\n"
+                f"Response body:\n{snippet}\n"
+            )
+        return "\n".join(lines)
+
+    def _process_body_analysis_results(
+        self,
+        state: ScanState,
+        response: ResponseBodyAnalysisResponse,
+        batch: list[tuple[str, Endpoint]],
+    ) -> int:
+        """Convert body analysis findings into VulnIndicators."""
+        added = 0
+        # associate all findings with the first endpoint in the batch if
+        # only one, otherwise distribute based on context (simplified: attach
+        # findings to all batch endpoints since the LLM sees them together)
+        batch_keys = [key for key, _ in batch]
+
+        for finding in response.findings:
+            if finding.is_placeholder:
+                continue
+
+            pattern = self._BODY_FINDING_TYPE_MAP.get(
+                finding.finding_type, VulnPattern.INFO_DISCLOSURE
+            )
+            try:
+                confidence = RiskLevel(finding.confidence)
+            except ValueError:
+                confidence = RiskLevel.HIGH
+
+            # attach finding to first batch endpoint (LLM prompt is per-batch)
+            ep_key = batch_keys[0] if batch_keys else None
+            if ep_key is None:
+                continue
+
+            indicator = VulnIndicator(
+                pattern=pattern,
+                confidence=confidence,
+                evidence=f"LLM body analysis: {finding.value_redacted}",
+                description=finding.context,
+                llm_enhanced=True,
+            )
+            existing = state.vuln_indicators.get(ep_key, [])
+            existing.append(indicator)
+            state.vuln_indicators[ep_key] = existing
+            added += 1
+
+        return added
 
     # ------------------------------------------------------------------
     # Pass 2: LLM analysis

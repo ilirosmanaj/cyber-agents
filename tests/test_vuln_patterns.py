@@ -1,14 +1,21 @@
-"""Tests for VulnPatternAnalyzer Pass 1 deterministic checks."""
+"""Tests for VulnPatternAnalyzer deterministic checks and body analysis."""
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from src.ghost_hunter.agents.vuln_analyzer import VulnPatternAnalyzer, _SEVERITY_ORDER
 from src.ghost_hunter.models import (
+    EndpointCategory,
     RiskLevel,
     ScanState,
     SecuritySchemeInfo,
     VulnIndicator,
     VulnPattern,
+)
+from src.ghost_hunter.models.llm_responses import (
+    ResponseBodyAnalysisResponse,
+    ResponseBodyFinding,
 )
 from tests.conftest import make_endpoint
 
@@ -434,6 +441,7 @@ class TestResponseBodyLeaks:
         )
 
 
+
 # ---------------------------------------------------------------------------
 # File upload detection
 # ---------------------------------------------------------------------------
@@ -723,7 +731,7 @@ class TestInjectionSurfaces:
     """Tests for _check_injection_surfaces — SQL, path traversal, command injection."""
 
     def test_sql_injection_params(self):
-        """Params like 'query' and 'filter' should flag SQL injection surface."""
+        """'query' and 'filter' params trigger SQL injection indicator."""
         ep = make_endpoint(
             url="https://vulnbank.org/api/v1/search",
             parameters=["query", "filter"],
@@ -735,7 +743,7 @@ class TestInjectionSurfaces:
         )
 
     def test_path_traversal_params(self):
-        """Params like 'file' and 'path' flag path traversal surface."""
+        """File-related param names should produce a PATH_TRAVERSAL indicator."""
         ep = make_endpoint(
             url="https://vulnbank.org/api/v1/download",
             parameters=["file"],
@@ -747,7 +755,7 @@ class TestInjectionSurfaces:
         )
 
     def test_command_injection_params(self):
-        """Params like 'cmd' and 'host' flag command injection at HIGH confidence."""
+        """'cmd' and 'host' get COMMAND_INJECTION at HIGH confidence."""
         ep = make_endpoint(
             url="https://vulnbank.org/api/v1/tools",
             parameters=["cmd", "host"],
@@ -824,3 +832,214 @@ class TestSSRFSegmentMatching:
         ep = make_endpoint(url="https://vulnbank.org/api/curriculum")
         indicators = VulnPatternAnalyzer._check_ssrf(ep)
         assert not indicators
+
+
+# ---------------------------------------------------------------------------
+# Body analysis endpoint filtering (Pass 1.5)
+# ---------------------------------------------------------------------------
+
+
+class TestBodyAnalysisFiltering:
+    """Tests for _select_endpoints_for_body_analysis."""
+
+    def test_debug_endpoint_selected(self, scan_state: ScanState):
+        """Endpoint with debug_endpoint category is selected for body analysis."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/debug/console",
+            category=EndpointCategory.DEBUG_ENDPOINT,
+            response_body_snippet="<html>Debug console output</html>",
+        )
+        scan_state.add_endpoint(ep)
+        selected = VulnPatternAnalyzer._select_endpoints_for_body_analysis(scan_state)
+        assert len(selected) == 1
+        assert selected[0][1] is ep
+
+    def test_admin_with_broken_auth_selected(self, scan_state: ScanState):
+        """Endpoint with broken_function_level_auth indicator is selected."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/admin/settings",
+            response_body_snippet='{"admin": true, "config": "..."}',
+        )
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+        scan_state.vuln_indicators[key] = [
+            VulnIndicator(
+                pattern=VulnPattern.BROKEN_FUNCTION_LEVEL_AUTH,
+                confidence=RiskLevel.CRITICAL,
+                evidence="Admin path without auth",
+                description="test",
+            ),
+        ]
+        selected = VulnPatternAnalyzer._select_endpoints_for_body_analysis(scan_state)
+        assert len(selected) == 1
+
+    def test_info_disclosure_endpoint_selected(self, scan_state: ScanState):
+        """Endpoint with info_disclosure indicator is selected."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/debug",
+            response_body_snippet="Stack trace here",
+        )
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+        scan_state.vuln_indicators[key] = [
+            VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.HIGH,
+                evidence="Accessible sensitive path",
+                description="test",
+            ),
+        ]
+        selected = VulnPatternAnalyzer._select_endpoints_for_body_analysis(scan_state)
+        assert len(selected) == 1
+
+    def test_static_asset_not_selected(self, scan_state: ScanState):
+        """Static asset with short body is not selected."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/static/style.css",
+            category=EndpointCategory.STATIC_ASSET,
+            response_body_snippet="body { color: red; }",
+        )
+        scan_state.add_endpoint(ep)
+        selected = VulnPatternAnalyzer._select_endpoints_for_body_analysis(scan_state)
+        assert len(selected) == 0
+
+    def test_empty_body_not_selected(self, scan_state: ScanState):
+        """Endpoint with empty snippet is skipped."""
+        ep = make_endpoint(
+            url="https://vulnbank.org/api/v1/users",
+            response_body_snippet="",
+        )
+        scan_state.add_endpoint(ep)
+        selected = VulnPatternAnalyzer._select_endpoints_for_body_analysis(scan_state)
+        assert len(selected) == 0
+
+
+# ---------------------------------------------------------------------------
+# Body analysis result processing (Pass 1.5)
+# ---------------------------------------------------------------------------
+
+
+class TestBodyAnalysisProcessing:
+    """Tests for _process_body_analysis_results."""
+
+    def _make_analyzer(self) -> VulnPatternAnalyzer:
+        """Create a VulnPatternAnalyzer with mocked dependencies."""
+        return VulnPatternAnalyzer(
+            http_client=MagicMock(),
+            llm_client=MagicMock(),
+            prompt_registry=MagicMock(),
+        )
+
+    def test_secret_finding_creates_indicator(self, scan_state: ScanState):
+        """A secret finding from LLM creates a VulnIndicator with correct pattern."""
+        analyzer = self._make_analyzer()
+        ep = make_endpoint(url="https://vulnbank.org/debug/console")
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+
+        response = ResponseBodyAnalysisResponse(
+            reasoning="Found a secret key assignment",
+            findings=[
+                ResponseBodyFinding(
+                    finding_type="secret",
+                    value_redacted="s3cr...here",
+                    context="SECRET_KEY assignment in Werkzeug debug console",
+                    confidence="critical",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [(key, ep)]
+        added = analyzer._process_body_analysis_results(scan_state, response, batch)
+
+        assert added == 1
+        indicators = scan_state.vuln_indicators[key]
+        assert len(indicators) == 1
+        assert indicators[0].pattern == VulnPattern.INFO_DISCLOSURE
+        assert indicators[0].confidence == RiskLevel.CRITICAL
+        assert indicators[0].llm_enhanced is True
+
+    def test_placeholder_finding_skipped(self, scan_state: ScanState):
+        """A finding with is_placeholder=True is not added."""
+        analyzer = self._make_analyzer()
+        ep = make_endpoint(url="https://vulnbank.org/docs/config")
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+
+        response = ResponseBodyAnalysisResponse(
+            reasoning="Found example value",
+            findings=[
+                ResponseBodyFinding(
+                    finding_type="secret",
+                    value_redacted="chan...geme",
+                    context="SECRET_KEY = 'changeme' in documentation",
+                    confidence="high",
+                    is_placeholder=True,
+                ),
+            ],
+        )
+        batch = [(key, ep)]
+        added = analyzer._process_body_analysis_results(scan_state, response, batch)
+
+        assert added == 0
+        assert key not in scan_state.vuln_indicators
+
+    def test_credential_finding_maps_to_excessive_data(self, scan_state: ScanState):
+        """A credential finding maps to EXCESSIVE_DATA_EXPOSURE pattern."""
+        analyzer = self._make_analyzer()
+        ep = make_endpoint(url="https://vulnbank.org/debug/env")
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+
+        response = ResponseBodyAnalysisResponse(
+            reasoning="Found database credentials",
+            findings=[
+                ResponseBodyFinding(
+                    finding_type="credential",
+                    value_redacted="post...prod",
+                    context="DATABASE_URL with embedded credentials",
+                    confidence="critical",
+                    is_placeholder=False,
+                ),
+            ],
+        )
+        batch = [(key, ep)]
+        added = analyzer._process_body_analysis_results(scan_state, response, batch)
+
+        assert added == 1
+        assert scan_state.vuln_indicators[key][0].pattern == VulnPattern.EXCESSIVE_DATA_EXPOSURE
+
+    def test_llm_failure_graceful(self, scan_state: ScanState):
+        """LLM failure doesn't crash; Pass 1 results stay intact."""
+        analyzer = self._make_analyzer()
+        analyzer.llm = AsyncMock()
+        analyzer.llm.chat_structured.side_effect = RuntimeError("LLM timeout")
+        analyzer.prompt_registry = MagicMock()
+
+        ep = make_endpoint(
+            url="https://vulnbank.org/debug",
+            category=EndpointCategory.DEBUG_ENDPOINT,
+            response_body_snippet="some content here " * 20,
+        )
+        scan_state.add_endpoint(ep)
+        key = scan_state.endpoint_key(ep.method, ep.url)
+
+        # simulate existing Pass 1 indicator
+        scan_state.vuln_indicators[key] = [
+            VulnIndicator(
+                pattern=VulnPattern.INFO_DISCLOSURE,
+                confidence=RiskLevel.HIGH,
+                evidence="Accessible sensitive path",
+                description="Pass 1 result",
+            ),
+        ]
+
+        import asyncio
+        count = asyncio.get_event_loop().run_until_complete(
+            analyzer._body_analysis_pass(scan_state)
+        )
+
+        assert count == 0
+        # Pass 1 result is still intact
+        assert len(scan_state.vuln_indicators[key]) == 1
+        assert scan_state.vuln_indicators[key][0].description == "Pass 1 result"

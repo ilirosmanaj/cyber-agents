@@ -1,6 +1,6 @@
 name: classifier
 version: "1.1"
-description: Categorizes endpoints by type and auth requirements for downstream security analysis
+description: Categorizes endpoints by type and auth requirements
 system_prompt: |
   CONTEXT:
   You are classifying web application endpoints discovered through multiple methods (crawling, OpenAPI spec parsing, JavaScript analysis, LLM hypothesis, common path probing). Your classifications feed directly into the vulnerability analyzer, so accurate categorization and auth assessment are critical for downstream security analysis.

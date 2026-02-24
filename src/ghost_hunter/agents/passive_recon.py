@@ -38,6 +38,9 @@ WELL_KNOWN_PATHS = [
     "/humans.txt",
 ]
 
+# max blocked paths to include in LLM recon context
+_MAX_BLOCKED_PATHS_IN_RECON = 20
+
 
 @register_agent
 class PassiveReconAgent(BaseAgent):
@@ -299,11 +302,10 @@ class PassiveReconAgent(BaseAgent):
         return endpoints, errors
 
     async def _llm_analyze_recon(self, state: ScanState) -> list[Finding]:
-        """Analyze collected recon data with LLM to produce structured intelligence."""
+        """Run LLM analysis on headers, cookies, and robots.txt data."""
         findings: list[Finding] = []
         fp = state.tech_fingerprint
 
-        # build context from all collected recon data
         context_parts: list[str] = []
 
         if fp.server:
@@ -318,12 +320,13 @@ class PassiveReconAgent(BaseAgent):
         if fp.cookies:
             context_parts.append(f"Cookies: {', '.join(fp.cookies)}")
         if state.blocked_paths:
-            context_parts.append(f"Disallowed paths (robots.txt): {', '.join(state.blocked_paths[:20])}")
+            context_parts.append(f"Disallowed paths (robots.txt): {', '.join(state.blocked_paths[:_MAX_BLOCKED_PATHS_IN_RECON])}")
 
-        well_known_notes: list[str] = []
-        for ep in state.endpoints.values():
-            if ep.discovered_by == DiscoverySource.HEADER_PROBE:
-                well_known_notes.append(f"{ep.url} [{ep.status_code}]")
+        well_known_notes = [
+            f"{ep.url} [{ep.status_code}]"
+            for ep in state.endpoints.values()
+            if ep.discovered_by == DiscoverySource.HEADER_PROBE
+        ]
         if well_known_notes:
             context_parts.append(f"Well-known path results: {', '.join(well_known_notes)}")
 

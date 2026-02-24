@@ -1,6 +1,6 @@
 name: vuln_analyzer
 version: "1.1"
-description: Deep vulnerability analysis on web application endpoints (Pass 2 — LLM semantic analysis)
+description: LLM pass that refines deterministic vuln indicators with semantic reasoning
 system_prompt: |
   You are a principal application security researcher performing deep vulnerability analysis on web application endpoints.
 

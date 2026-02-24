@@ -47,7 +47,7 @@ CLASSIFIER_CASES = [
     },
     {
         "name": "mixed_categories",
-        "description": "LLM receives all endpoints; auth/admin/docs classified by LLM",
+        "description": "Mixed auth, admin, and docs endpoints",
         "endpoints": [
             {
                 "url": "https://vulnbank.org/login",
@@ -85,7 +85,7 @@ CLASSIFIER_CASES = [
     },
     {
         "name": "graphql_and_llm_rest",
-        "description": "LLM receives all including graphql; LLM classifies both",
+        "description": "GraphQL endpoint alongside a public REST endpoint",
         "endpoints": [
             {
                 "url": "https://vulnbank.org/graphql",
@@ -114,7 +114,7 @@ CLASSIFIER_CASES = [
     },
     {
         "name": "pre_classification_static_assets",
-        "description": "LLM receives static assets and health check but rule overrides correct to STATIC_ASSET/HEALTH_CHECK",
+        "description": "Rule overrides correct LLM misclassification of static assets and health checks",
         "endpoints": [
             {
                 "url": "https://vulnbank.org/static/app.js",

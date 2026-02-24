@@ -157,7 +157,43 @@ class APIGuessResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 2i. Passive Recon — ReconAnalysisResponse
+# 2i. Vuln Analyzer — ResponseBodyAnalysisResponse (Pass 1.5)
+# ---------------------------------------------------------------------------
+
+class ResponseBodyFinding(BaseModel):
+    finding_type: str  # "secret", "config_leak", "debug_info", "credential"
+    value_redacted: str  # the secret with middle chars masked
+    context: str  # surrounding context explaining what this is
+    confidence: str = "high"
+    is_placeholder: bool = False  # true if it looks like a dummy/example value
+
+
+class ResponseBodyAnalysisResponse(BaseModel):
+    reasoning: str = ""
+    findings: list[ResponseBodyFinding] = Field(default_factory=list)
+    confidence: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# 2j. Web Crawler — HTMLIntelAnalysisResponse
+# ---------------------------------------------------------------------------
+
+class HTMLIntelFinding(BaseModel):
+    finding_type: str  # "leaked_secret", "sensitive_comment", "debug_indicator"
+    evidence: str  # the relevant snippet
+    context: str  # explanation of what was found and why it matters
+    confidence: str = "high"
+    is_placeholder: bool = False  # true if it looks like a dummy/example value
+
+
+class HTMLIntelAnalysisResponse(BaseModel):
+    reasoning: str = ""
+    findings: list[HTMLIntelFinding] = Field(default_factory=list)
+    confidence: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# 2k. Passive Recon — ReconAnalysisResponse
 # ---------------------------------------------------------------------------
 
 class ReconAnalysisResponse(BaseModel):

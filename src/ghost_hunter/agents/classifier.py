@@ -1,4 +1,4 @@
-"""Classifier agent — LLM classifies ALL endpoints, rules override only highest-confidence cases."""
+"""Classifier agent — LLM categorizes endpoints, deterministic rules correct obvious cases."""
 
 from __future__ import annotations
 
@@ -29,8 +29,6 @@ _MAX_NOTES_LENGTH = 120
 # max chars of response body snippet per endpoint in batch context
 _MAX_SNIPPET_IN_BATCH = 200
 
-# --- High-confidence rule overrides (applied AFTER LLM) ---
-
 _HEALTH_PATHS = re.compile(
     r"^/(?:health|healthz|readyz|status|ping|alive|ready)$", re.IGNORECASE
 )
@@ -45,13 +43,7 @@ _STATIC_CONTENT_TYPES = frozenset({
 
 
 def _rule_override(ep: Endpoint) -> EndpointCategory | None:
-    """High-confidence rule overrides applied AFTER LLM classification.
-
-    Only overrides for near-100% confidence cases:
-    - Static file extensions → STATIC_ASSET
-    - Content-type MIME match → STATIC_ASSET
-    - Exact health paths → HEALTH_CHECK
-    """
+    """Override LLM classification for static assets and health checks."""
     path = urlparse(ep.url).path
 
     if _STATIC_EXTENSIONS.search(path):
@@ -90,7 +82,7 @@ class ClassifierAgent(BaseAgent):
                 f"{', '.join(state.scan_strategy.tech_hypotheses)}\n"
             )
 
-        # pass 1: LLM classifies ALL endpoints
+        # LLM classifies all endpoints
         llm_batch: list[tuple[int, str, Endpoint]] = [
             (idx, key, ep) for idx, (key, ep) in enumerate(all_endpoints)
         ]
@@ -150,18 +142,15 @@ class ClassifierAgent(BaseAgent):
             except Exception as e:
                 errors.append(f"Classification batch {i // BATCH_SIZE} failed: {e}")
 
-        # pass 2: high-confidence rule overrides correct LLM mistakes
+        # deterministic overrides for static assets and health checks
         override_count = 0
         for _key, ep in all_endpoints:
             override = _rule_override(ep)
             if override is not None and ep.category != override:
                 ep.category = override
                 override_count += 1
-            elif override is not None and ep.category is None:
-                ep.category = override
-                override_count += 1
 
-        # pass 3: auth inference from status codes / security schemes
+        # infer auth from status codes and security schemes
         for _key, ep in all_endpoints:
             if ep.requires_auth is None and ep.security_schemes:
                 ep.requires_auth = True
